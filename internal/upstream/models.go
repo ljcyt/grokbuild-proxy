@@ -45,7 +45,9 @@ func (c *Client) ListModels(ctx context.Context, accessToken string) (*ModelList
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("upstream models: status %d: %s", status, truncate(string(raw), 512))
+		return nil, &HTTPStatusError{
+			Operation: "upstream models", StatusCode: status, Body: truncate(string(raw), 512),
+		}
 	}
 	return ParseModelList(raw)
 }

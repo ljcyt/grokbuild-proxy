@@ -54,6 +54,13 @@ flowchart TD
     OT --> EX
     AH --> EX
 
+    AH --> IM[Import job manager]
+    IM --> SC[Optional SSO converter]
+    IM --> ST
+
+    AH --> IN[Credential inspector]
+    IN --> EX
+
     EX --> LB[Credential selector]
     EX --> RF[OAuth refresher]
     EX --> ST[Atomic JSON store]
@@ -73,6 +80,10 @@ flowchart TD
 | `internal/proxy` | Credential selection, token acquisition, retries, failover |
 | `internal/lb` | Priority round-robin, sticky sessions, cooldown state |
 | `internal/auth` | OAuth discovery, device flow, import, refresh |
+| `internal/importer` | Bounded asynchronous multi-format credential imports |
+| `internal/inspection` | Scheduled/manual validation, quarantine, delayed cleanup |
+| `internal/outbound` | Global/per-credential proxy resolution and transport caching |
+| `internal/sso` | Protected optional SSO converter client |
 | `internal/storage` | Credentials, client keys, bootstrap metadata, atomic writes |
 | `internal/upstream` | Grok request headers, models, billing, Responses transport |
 | `internal/admin` | Authenticated management API |
@@ -164,6 +175,40 @@ survives process restarts.
 OAuth refresh is currently request-driven; there is no background pre-refresh
 scheduler.
 
+Credential identity is independent of source filenames or JSON object keys.
+OIDC issuer, client, user/team identity is preferred; normalized email and
+token fingerprints are compatibility fallbacks. Batch imports validate first,
+then commit successful credentials with one locked atomic store write.
+
+The OAuth issuer is a fixed trust boundary, not imported routing data. Only
+`https://auth.x.ai` is accepted for persisted credentials and runtime refresh;
+discovery, device-code, and token endpoints are revalidated before secrets are
+sent. Test-only endpoint overrides require an explicit unsafe test flag.
+
+The inspector probes each credential through that credential's resolved route.
+A 401 is refreshed and re-probed; quarantine requires both repeated 401 evidence
+and a terminal refresh failure. A successful refresh followed by another 401 is
+retained for later inspection rather than deleted. A 429 only enters cooldown;
+network, proxy, 402/403/407, and 5xx failures are retained. Automatic physical
+deletion is disabled by default and, when enabled, requires an expired retention
+period, an unchanged token fingerprint, and a fresh terminal-auth confirmation.
+
+## Outbound routing
+
+Routing precedence is credential `direct`/URL, runtime Admin settings, YAML,
+environment proxy variables, then direct. Invalid configured proxies fail
+closed instead of silently using a direct connection. Admin responses expose
+only the route mode/source and redacted URL. Token refresh, model/billing calls,
+generation, and inspection resolve through the same credential route.
+
+## Credential imports
+
+The Admin import API accepts repeated files or raw text and recognizes Grok
+auth JSON, CPA xAI JSON, and SSO text. Parsing may produce per-item warnings or
+failures; all successful normalized credentials are committed as one storage
+batch. Raw SSO exists only in process memory until the optional sidecar returns
+normalized credentials.
+
 ## Storage
 
 Runtime state is stored under `data_dir`:
@@ -172,6 +217,7 @@ Runtime state is stored under `data_dir`:
 credentials.json
 clients.json
 meta.json
+settings.json
 ```
 
 Storage properties:

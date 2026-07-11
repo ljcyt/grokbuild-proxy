@@ -14,6 +14,9 @@
 *.out
 coverage.*
 *.coverprofile
+__pycache__/
+*.py[cod]
+.pytest_cache/
 
 # Go workspace (local)
 go.work
@@ -30,6 +33,11 @@ config.yml
 # Runtime data
 /data/*
 !/data/.gitkeep
+
+# Local source/reference bundles used during credential-import development
+/grok2api-sso-to-grokbuild.zip
+/grok_reg-share-*.zip
+/grok_reg-share-*/
 
 # IDE / OS
 .idea/

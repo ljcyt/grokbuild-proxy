@@ -64,3 +64,58 @@ Loopback is the default. A non-loopback bind requires
 required, place the proxy behind a trusted TLS reverse proxy, restrict source
 networks, protect `/admin`, `/metrics`, and all `/v1` endpoints, and rotate any
 key exposed to browsers or logs.
+
+## Credential imports
+
+Use the Admin UI or `POST /admin/credential-imports`; the legacy
+`/admin/import-jobs` route remains available. Configure `import.max_files`,
+`max_file_bytes`, `max_total_bytes`, `max_entries`, `max_queued_jobs`,
+`max_queued_bytes`, `max_retained_jobs`, `max_retained_bytes`, and `job_ttl_min`
+before accepting operator uploads. Queue
+overload returns HTTP 429 with `Retry-After`; jobs report per-file/per-account
+outcomes without returning SSO cookies or OAuth tokens.
+
+Imported `oidc_issuer` values must resolve exactly to `https://auth.x.ai`.
+Credentials naming another issuer are rejected before persistence, preventing
+refresh tokens from being sent to imported or discovered third-party hosts.
+
+SSO conversion is optional. Keep it disabled unless required. With Compose,
+set one strong `SSO_CONVERTER_API_TOKEN`, copy it to
+`sso_converter.api_key`, configure `http://sso-import:8090`, and start
+`docker compose --profile sso-import up -d`. The sidecar is internal-only;
+`SSO_CONVERTER_PROXY` controls its x.ai egress route.
+Keep `sso_converter.max_batch` at or below 100 and `timeout_sec` at or below
+300 seconds. x.ai responses are capped at 1 MiB, and item deadlines
+cooperatively stop semaphore waits, retries, backoff, and polling.
+
+## Proxy changes
+
+Global proxy settings can be changed in Admin. Credential `direct` or URL mode
+overrides the global route; `inherit` follows it. Stored and returned URLs are
+redacted in read APIs. A malformed or unavailable configured proxy is treated
+as an error and never falls back silently to direct access.
+
+After changing a route, run a manual inspection or billing refresh to verify it.
+HTTP 407 indicates proxy authentication failure and must not be treated as an
+invalid Grok credential.
+
+## Inspection and quarantine
+
+Inspection is disabled by default. Start with low concurrency and retain the
+mass-failure guard. Quarantine requires repeated 401 probes plus a terminal
+refresh failure; a successful refresh followed by another 401 is retained for
+later inspection. A 429 only sets cooldown, and transport/5xx errors are
+retained. Manual disables are never automatically reversed.
+
+Keep `inspection.purge_after_sec: 0` unless physical deletion is explicitly
+required. When enabled, cleanup occurs only after the retention deadline, an
+unchanged token fingerprint, and another confirmed terminal-auth failure.
+Always back up `data_dir` before enabling cleanup.
+
+## Billing interpretation
+
+The primary Admin card is Grok Build's shared weekly usage. Product-level
+GrokBuild usage is a contribution to that shared pool, not an independent
+quota. “Not reported” means the upstream omitted the value; it is distinct from
+a real zero. Monthly/API payloads and one-sided request errors remain available
+in the folded diagnostics view.

@@ -4,15 +4,22 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/auth"
 	"github.com/GreyGunG/grokbuild-proxy/internal/config"
+	"github.com/GreyGunG/grokbuild-proxy/internal/importer"
+	"github.com/GreyGunG/grokbuild-proxy/internal/inspection"
+	"github.com/GreyGunG/grokbuild-proxy/internal/outbound"
+	"github.com/GreyGunG/grokbuild-proxy/internal/sso"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 	"github.com/GreyGunG/grokbuild-proxy/internal/upstream"
 )
@@ -26,6 +33,7 @@ type Store interface {
 	GetCredential(id string) (storage.Credential, error)
 	CreateCredential(in storage.CreateCredentialInput) (storage.Credential, error)
 	UpdateCredential(c storage.Credential) (storage.Credential, error)
+	PatchCredential(id string, mutate func(*storage.Credential) error) (storage.Credential, error)
 	DeleteCredential(id string) error
 	SetCredentialEnabled(id string, enabled bool) (storage.Credential, error)
 	SetCredentialPriority(id string, priority int) (storage.Credential, error)
@@ -38,6 +46,34 @@ type credentialUpserter interface {
 	UpsertCredential(in storage.CreateCredentialInput) (storage.Credential, bool, error)
 }
 
+type RuntimeSettingsService interface {
+	Current() storage.RuntimeSettings
+	Update(func(*storage.RuntimeSettings) error) (storage.RuntimeSettings, error)
+}
+
+type idleConnectionCloser interface {
+	CloseIdleConnections()
+}
+
+type proxyResolver interface {
+	Resolve(*storage.Credential) (outbound.ResolvedProxy, error)
+}
+
+type tokenCacheInvalidator interface {
+	Invalidate(key string)
+}
+
+type ImportJobService interface {
+	Start(files []importer.InputFile) (importer.Job, error)
+	Get(id string) (importer.Job, bool)
+}
+
+type InspectionService interface {
+	RunOnce(ctx context.Context) (inspection.Summary, error)
+	Last() (inspection.Summary, bool)
+	Running() bool
+}
+
 // TokenService refreshes credentials and fetches billing.
 type TokenService interface {
 	ForceRefreshToken(ctx context.Context, credID string) (auth.TokenSet, storage.Credential, error)
@@ -46,10 +82,17 @@ type TokenService interface {
 
 // Handlers serves /admin/* endpoints.
 type Handlers struct {
-	Store  Store
-	Tokens TokenService
-	OAuth  DeviceOAuth
-	Config config.Config
+	Store         Store
+	Tokens        TokenService
+	OAuth         DeviceOAuth
+	OAuthFor      func() (DeviceOAuth, error)
+	Settings      RuntimeSettingsService
+	Outbound      idleConnectionCloser
+	ProxyResolver proxyResolver
+	TokenCache    tokenCacheInvalidator
+	Imports       ImportJobService
+	Inspection    InspectionService
+	Config        config.Config
 	// AdminKey is the plaintext admin bearer secret (process-local).
 	AdminKey string
 	// Version overrides package Version when non-empty.
@@ -63,52 +106,85 @@ type Handlers struct {
 
 // maskedCredential is a credential view with secrets redacted.
 type maskedCredential struct {
-	ID            string         `json:"id"`
-	Name          string         `json:"name"`
-	Email         string         `json:"email,omitempty"`
-	UserID        string         `json:"user_id,omitempty"`
-	TeamID        string         `json:"team_id,omitempty"`
-	OIDCClientID  string         `json:"oidc_client_id,omitempty"`
-	AccessToken   string         `json:"access_token"`  // masked
-	RefreshToken  string         `json:"refresh_token"` // masked
-	HasAccess     bool           `json:"has_access_token"`
-	HasRefresh    bool           `json:"has_refresh_token"`
-	ExpiresAt     time.Time      `json:"expires_at"`
-	Enabled       bool           `json:"enabled"`
-	Priority      int            `json:"priority"`
-	FailureCount  int            `json:"failure_count"`
-	CooldownUntil *time.Time     `json:"cooldown_until,omitempty"`
-	LastError     string         `json:"last_error,omitempty"`
-	LastUsedAt    *time.Time     `json:"last_used_at,omitempty"`
-	LastSuccessAt *time.Time     `json:"last_success_at,omitempty"`
-	Billing       map[string]any `json:"billing,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	ID                   string         `json:"id"`
+	Name                 string         `json:"name"`
+	Email                string         `json:"email,omitempty"`
+	UserID               string         `json:"user_id,omitempty"`
+	TeamID               string         `json:"team_id,omitempty"`
+	OIDCClientID         string         `json:"oidc_client_id,omitempty"`
+	OIDCIssuer           string         `json:"oidc_issuer,omitempty"`
+	AccessToken          string         `json:"access_token"`  // masked
+	RefreshToken         string         `json:"refresh_token"` // masked
+	HasAccess            bool           `json:"has_access_token"`
+	HasRefresh           bool           `json:"has_refresh_token"`
+	ExpiresAt            time.Time      `json:"expires_at"`
+	Enabled              bool           `json:"enabled"`
+	ManualDisabled       bool           `json:"manual_disabled,omitempty"`
+	LifecycleState       string         `json:"lifecycle_state,omitempty"`
+	DisableReason        string         `json:"disable_reason,omitempty"`
+	QuarantinedAt        *time.Time     `json:"quarantined_at,omitempty"`
+	PurgeAfter           *time.Time     `json:"purge_after,omitempty"`
+	ProxyMode            string         `json:"proxy_mode,omitempty"`
+	ProxyURL             string         `json:"proxy_url,omitempty"`
+	EffectiveProxy       map[string]any `json:"effective_proxy,omitempty"`
+	Priority             int            `json:"priority"`
+	FailureCount         int            `json:"failure_count"`
+	CooldownUntil        *time.Time     `json:"cooldown_until,omitempty"`
+	LastError            string         `json:"last_error,omitempty"`
+	LastUsedAt           *time.Time     `json:"last_used_at,omitempty"`
+	LastSuccessAt        *time.Time     `json:"last_success_at,omitempty"`
+	LastInspectionAt     *time.Time     `json:"last_inspection_at,omitempty"`
+	LastInspectionStatus string         `json:"last_inspection_status,omitempty"`
+	LastInspectionError  string         `json:"last_inspection_error,omitempty"`
+	Billing              map[string]any `json:"billing,omitempty"`
+	CreatedAt            time.Time      `json:"created_at"`
+	UpdatedAt            time.Time      `json:"updated_at"`
+}
+
+func (h *Handlers) maskedCredential(c storage.Credential) maskedCredential {
+	out := maskCredential(c)
+	if h != nil && h.ProxyResolver != nil {
+		if resolved, err := h.ProxyResolver.Resolve(&c); err == nil {
+			out.EffectiveProxy = map[string]any{"mode": resolved.Mode, "source": resolved.Source, "url": outbound.RedactedURL(resolved.URL)}
+		}
+	}
+	return out
 }
 
 func maskCredential(c storage.Credential) maskedCredential {
 	return maskedCredential{
-		ID:            c.ID,
-		Name:          c.Name,
-		Email:         c.Email,
-		UserID:        c.UserID,
-		TeamID:        c.TeamID,
-		OIDCClientID:  c.OIDCClientID,
-		AccessToken:   maskSecret(c.AccessToken),
-		RefreshToken:  maskSecret(c.RefreshToken),
-		HasAccess:     strings.TrimSpace(c.AccessToken) != "",
-		HasRefresh:    strings.TrimSpace(c.RefreshToken) != "",
-		ExpiresAt:     c.ExpiresAt,
-		Enabled:       c.Enabled,
-		Priority:      c.Priority,
-		FailureCount:  c.FailureCount,
-		CooldownUntil: c.CooldownUntil,
-		LastError:     c.LastError,
-		LastUsedAt:    c.LastUsedAt,
-		LastSuccessAt: c.LastSuccessAt,
-		Billing:       c.Billing,
-		CreatedAt:     c.CreatedAt,
-		UpdatedAt:     c.UpdatedAt,
+		ID:                   c.ID,
+		Name:                 c.Name,
+		Email:                c.Email,
+		UserID:               c.UserID,
+		TeamID:               c.TeamID,
+		OIDCClientID:         c.OIDCClientID,
+		OIDCIssuer:           c.OIDCIssuer,
+		AccessToken:          maskSecret(c.AccessToken),
+		RefreshToken:         maskSecret(c.RefreshToken),
+		HasAccess:            strings.TrimSpace(c.AccessToken) != "",
+		HasRefresh:           strings.TrimSpace(c.RefreshToken) != "",
+		ExpiresAt:            c.ExpiresAt,
+		Enabled:              c.Enabled,
+		ManualDisabled:       c.ManualDisabled,
+		LifecycleState:       c.LifecycleState,
+		DisableReason:        c.DisableReason,
+		QuarantinedAt:        c.QuarantinedAt,
+		PurgeAfter:           c.PurgeAfter,
+		ProxyMode:            c.ProxyMode,
+		ProxyURL:             outbound.RedactedURL(c.ProxyURL),
+		Priority:             c.Priority,
+		FailureCount:         c.FailureCount,
+		CooldownUntil:        c.CooldownUntil,
+		LastError:            c.LastError,
+		LastUsedAt:           c.LastUsedAt,
+		LastSuccessAt:        c.LastSuccessAt,
+		LastInspectionAt:     c.LastInspectionAt,
+		LastInspectionStatus: c.LastInspectionStatus,
+		LastInspectionError:  c.LastInspectionError,
+		Billing:              c.Billing,
+		CreatedAt:            c.CreatedAt,
+		UpdatedAt:            c.UpdatedAt,
 	}
 }
 
@@ -190,7 +266,7 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]maskedCredential, 0, len(creds))
 	for _, c := range creds {
-		out = append(out, maskCredential(c))
+		out = append(out, h.maskedCredential(c))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"credentials": out})
 }
@@ -205,6 +281,7 @@ func (h *Handlers) CreateCredential(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt    string `json:"expires_at"`
 		Priority     *int   `json:"priority"`
 		Enabled      *bool  `json:"enabled"`
+		OIDCIssuer   string `json:"oidc_issuer"`
 		OIDCClientID string `json:"oidc_client_id"`
 		UserID       string `json:"user_id"`
 		TeamID       string `json:"team_id"`
@@ -227,6 +304,7 @@ func (h *Handlers) CreateCredential(w http.ResponseWriter, r *http.Request) {
 		Email:        body.Email,
 		UserID:       body.UserID,
 		TeamID:       body.TeamID,
+		OIDCIssuer:   body.OIDCIssuer,
 		OIDCClientID: body.OIDCClientID,
 		AccessToken:  body.AccessToken,
 		RefreshToken: body.RefreshToken,
@@ -235,113 +313,341 @@ func (h *Handlers) CreateCredential(w http.ResponseWriter, r *http.Request) {
 		Priority:     body.Priority,
 	})
 	if err != nil {
+		if errors.Is(err, storage.ErrCredentialExists) {
+			writeErr(w, http.StatusConflict, "credential already exists; update or import it instead")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, maskCredential(created))
+	writeJSON(w, http.StatusCreated, h.maskedCredential(created))
 }
 
 // ImportGrok POST /admin/credentials/import-grok
 // Prefer body.raw JSON. path is optional and jailed to ~/.grok or data_dir.
 func (h *Handlers) ImportGrok(w http.ResponseWriter, r *http.Request) {
+	if h.Imports == nil {
+		writeErr(w, http.StatusServiceUnavailable, "credential importer unavailable")
+		return
+	}
 	var body struct {
 		Path string          `json:"path"`
 		Raw  json.RawMessage `json:"raw"`
 	}
 	// Body is optional; empty body → default path. Malformed JSON is 400 (not silent fallback).
-	if err := decodeJSON(r, h.maxBody(), &body); err != nil {
+	maxTotalBytes := h.importMaxTotalBytes()
+	if err := decodeJSON(r, maxTotalBytes, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	var imported []auth.ImportedCredential
-	var err error
+	var data []byte
+	var name string
 	if len(body.Raw) > 0 {
-		imported, err = auth.ParseGrokAuthJSON(body.Raw)
+		data = append([]byte(nil), body.Raw...)
+		name = "auth.json"
 	} else {
-		path := strings.TrimSpace(body.Path)
-		var extraRoots []string
-		if h != nil && strings.TrimSpace(h.Config.DataDir) != "" {
-			extraRoots = append(extraRoots, h.Config.DataDir)
+		var err error
+		data, name, err = h.readLegacyGrokAuthFile(body.Path)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		imported, err = auth.ImportGrokAuthFile(path, extraRoots...)
 	}
+	job, err := h.Imports.Start([]importer.InputFile{{Name: name, Format: importer.FormatJSON, Data: data}})
+	wipeBytes(data)
+	if err != nil {
+		if errors.Is(err, importer.ErrOverloaded) {
+			w.Header().Set("Retry-After", "1")
+			writeErr(w, http.StatusTooManyRequests, err.Error())
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	finished, ok := h.waitImportJob(r.Context(), job.ID)
+	if !ok {
+		w.Header().Set("Location", "/admin/import-jobs/"+job.ID)
+		writeJSON(w, http.StatusAccepted, job)
+		return
+	}
+	h.writeLegacyImportResponse(r.Context(), w, finished)
+}
+
+func (h *Handlers) writeLegacyImportResponse(ctx context.Context, w http.ResponseWriter, job importer.Job) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	// Resolve imported IDs from one credentials snapshot. Calling GetCredential
+	// once per result rereads and decodes the full credentials file up to the
+	// batch limit, turning the compatibility response into O(batch*pool) I/O.
+	credentialsByID := make(map[string]storage.Credential)
+	if stored, err := h.Store.ListCredentials(); err == nil {
+		credentialsByID = make(map[string]storage.Credential, len(stored))
+		for _, credential := range stored {
+			credentialsByID[credential.ID] = credential
+		}
+	}
+	credentials := make([]maskedCredential, 0, job.Created+job.Updated)
+	results := make([]map[string]any, 0, len(job.Results))
+	for _, item := range job.Results {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		result := map[string]any{"source_key": item.Source, "status": item.Status}
+		if item.CredentialID != "" {
+			result["id"] = item.CredentialID
+			if credential, ok := credentialsByID[item.CredentialID]; ok {
+				credentials = append(credentials, h.maskedCredential(credential))
+			}
+			if h.TokenCache != nil {
+				h.TokenCache.Invalidate(item.CredentialID)
+			}
+		}
+		if item.Error != "" {
+			result["error"] = item.Error
+		}
+		results = append(results, result)
+	}
+	status := http.StatusOK
+	if job.Created > 0 {
+		status = http.StatusCreated
+	}
+	if job.Failed > 0 && job.Created+job.Updated == 0 {
+		status = http.StatusBadRequest
+	} else if job.Failed > 0 {
+		status = http.StatusMultiStatus
+	}
+	writeJSON(w, status, map[string]any{
+		"imported":    job.Created + job.Updated,
+		"created":     job.Created,
+		"updated":     job.Updated,
+		"failed":      job.Failed,
+		"job_id":      job.ID,
+		"results":     results,
+		"credentials": credentials,
+	})
+}
+
+func (h *Handlers) waitImportJob(ctx context.Context, id string) (importer.Job, bool) {
+	maxWait := h.Config.RequestTimeout()
+	if maxWait <= 0 {
+		maxWait = 30 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, maxWait)
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		job, ok := h.Imports.Get(id)
+		if !ok {
+			return importer.Job{}, false
+		}
+		switch job.Status {
+		case importer.StatusCompleted, importer.StatusPartial, importer.StatusFailed:
+			return job, true
+		}
+		select {
+		case <-waitCtx.Done():
+			return job, false
+		case <-ticker.C:
+		}
+	}
+}
+
+func (h *Handlers) readLegacyGrokAuthFile(path string) ([]byte, string, error) {
+	var roots []string
+	if strings.TrimSpace(h.Config.DataDir) != "" {
+		roots = append(roots, h.Config.DataDir)
+	}
+	resolved, err := auth.ResolveGrokAuthPath(path, roots...)
+	if err != nil {
+		return nil, "", err
+	}
+	file, err := os.Open(resolved)
+	if err != nil {
+		return nil, "", fmt.Errorf("import grok auth: read failed: %w", err)
+	}
+	defer file.Close()
+	limit := h.Config.Import.MaxFileBytes
+	if limit <= 0 || limit > h.importMaxTotalBytes() {
+		limit = h.importMaxTotalBytes()
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("import grok auth: read failed: %w", err)
+	}
+	if int64(len(data)) > limit {
+		wipeBytes(data)
+		return nil, "", fmt.Errorf("import grok auth: file exceeds %d bytes", limit)
+	}
+	return data, filepath.Base(resolved), nil
+}
+
+func (h *Handlers) importMaxTotalBytes() int64 {
+	if h != nil && h.Config.Import.MaxTotalBytes > 0 {
+		return h.Config.Import.MaxTotalBytes
+	}
+	return 16 << 20
+}
+
+func wipeBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
+}
+
+// StartImportJob POST /admin/import-jobs accepts multipart files or JSON documents.
+func (h *Handlers) StartImportJob(w http.ResponseWriter, r *http.Request) {
+	if h.Imports == nil {
+		writeErr(w, http.StatusServiceUnavailable, "credential importer unavailable")
+		return
+	}
+	files, err := h.readImportFiles(w, r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	job, err := h.Imports.Start(files)
+	if err != nil {
+		if errors.Is(err, importer.ErrOverloaded) {
+			w.Header().Set("Retry-After", "1")
+			writeErr(w, http.StatusTooManyRequests, err.Error())
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	collectionPath := "/admin/import-jobs"
+	if strings.TrimSuffix(r.URL.Path, "/") == "/admin/credential-imports" {
+		collectionPath = "/admin/credential-imports"
+	}
+	w.Header().Set("Location", collectionPath+"/"+job.ID)
+	writeJSON(w, http.StatusAccepted, job)
+}
 
-	credentials := make([]maskedCredential, 0, len(imported))
-	results := make([]map[string]any, 0, len(imported))
-	createdCount := 0
-	updatedCount := 0
-	failedCount := 0
-	upserter, canUpsert := h.Store.(credentialUpserter)
-	for _, ic := range imported {
-		name := ic.Email
-		if name == "" {
-			name = ic.SourceKey
+// ImportJob GET /admin/import-jobs/{id}.
+func (h *Handlers) ImportJob(w http.ResponseWriter, r *http.Request, id string) {
+	if h.Imports == nil {
+		writeErr(w, http.StatusServiceUnavailable, "credential importer unavailable")
+		return
+	}
+	job, ok := h.Imports.Get(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "import job not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (h *Handlers) readImportFiles(w http.ResponseWriter, r *http.Request) ([]importer.InputFile, error) {
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	maxFileBytes := h.Config.Import.MaxFileBytes
+	if maxFileBytes <= 0 {
+		maxFileBytes = 4 << 20
+	}
+	maxTotalBytes := h.Config.Import.MaxTotalBytes
+	if maxTotalBytes <= 0 {
+		maxTotalBytes = 16 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxTotalBytes)
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		reader, err := r.MultipartReader()
+		if err != nil {
+			return nil, fmt.Errorf("invalid multipart body: %w", err)
 		}
-		input := storage.CreateCredentialInput{
-			Name:         name,
-			Email:        ic.Email,
-			UserID:       ic.UserID,
-			TeamID:       ic.TeamID,
-			SourceKey:    ic.SourceKey,
-			OIDCClientID: ic.OIDCClientID,
-			AccessToken:  ic.AccessToken,
-			RefreshToken: ic.RefreshToken,
-			ExpiresAt:    ic.ExpiresAt,
-		}
-		var c storage.Credential
-		var wasCreated bool
-		var cerr error
-		if canUpsert {
-			c, wasCreated, cerr = upserter.UpsertCredential(input)
-		} else {
-			c, cerr = h.Store.CreateCredential(input)
-			wasCreated = cerr == nil
-		}
-		if cerr != nil {
-			failedCount++
-			results = append(results, map[string]any{
-				"source_key": ic.SourceKey,
-				"status":     "failed",
-				"error":      cerr.Error(),
+		format := importer.FormatAuto
+		var files []importer.InputFile
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("read multipart body: %w", err)
+			}
+			if part.FileName() == "" {
+				value, readErr := io.ReadAll(io.LimitReader(part, 1025))
+				_ = part.Close()
+				if readErr != nil {
+					return nil, fmt.Errorf("read multipart field: %w", readErr)
+				}
+				if part.FormName() == "format" {
+					format = strings.ToLower(strings.TrimSpace(string(value)))
+				}
+				continue
+			}
+			value, readErr := io.ReadAll(io.LimitReader(part, maxFileBytes+1))
+			_ = part.Close()
+			if readErr != nil {
+				return nil, fmt.Errorf("read import file: %w", readErr)
+			}
+			if int64(len(value)) > maxFileBytes {
+				return nil, fmt.Errorf("import file %q exceeds %d bytes", filepath.Base(part.FileName()), maxFileBytes)
+			}
+			files = append(files, importer.InputFile{
+				Name: filepath.Base(part.FileName()), Format: format, Data: value,
 			})
-			continue
 		}
-		if wasCreated {
-			createdCount++
-		} else {
-			updatedCount++
+		for index := range files {
+			if files[index].Format == importer.FormatAuto && format != "" {
+				files[index].Format = format
+			}
 		}
-		status := "updated"
-		if wasCreated {
-			status = "created"
+		return files, nil
+	}
+
+	var body struct {
+		Name      string          `json:"name"`
+		Format    string          `json:"format"`
+		Raw       json.RawMessage `json:"raw"`
+		Text      string          `json:"text"`
+		Documents []struct {
+			Name    string          `json:"name"`
+			Format  string          `json:"format"`
+			Content json.RawMessage `json:"content"`
+			Text    string          `json:"text"`
+		} `json:"documents"`
+	}
+	if err := decodeJSON(r, h.maxBody(), &body); err != nil {
+		return nil, err
+	}
+	var files []importer.InputFile
+	if len(body.Documents) > 0 {
+		for index, document := range body.Documents {
+			data, err := importDocumentBytes(document.Content, document.Text)
+			if err != nil {
+				return nil, fmt.Errorf("document %d: %w", index+1, err)
+			}
+			files = append(files, importer.InputFile{
+				Name: document.Name, Format: document.Format, Data: data,
+			})
 		}
-		results = append(results, map[string]any{
-			"source_key": ic.SourceKey,
-			"status":     status,
-			"id":         c.ID,
-		})
-		credentials = append(credentials, maskCredential(c))
+	} else {
+		data, err := importDocumentBytes(body.Raw, body.Text)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, importer.InputFile{Name: body.Name, Format: body.Format, Data: data})
 	}
-	status := http.StatusOK
-	if createdCount > 0 {
-		status = http.StatusCreated
+	return files, nil
+}
+
+func importDocumentBytes(raw json.RawMessage, text string) ([]byte, error) {
+	if len(raw) > 0 && string(raw) != "null" {
+		if raw[0] == '"' {
+			var decoded string
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				return nil, fmt.Errorf("invalid string document")
+			}
+			return []byte(decoded), nil
+		}
+		return append([]byte(nil), raw...), nil
 	}
-	if failedCount > 0 {
-		status = http.StatusMultiStatus
+	if strings.TrimSpace(text) != "" {
+		return []byte(text), nil
 	}
-	writeJSON(w, status, map[string]any{
-		"imported":    len(credentials),
-		"created":     createdCount,
-		"updated":     updatedCount,
-		"failed":      failedCount,
-		"results":     results,
-		"credentials": credentials,
-	})
+	return nil, fmt.Errorf("raw or text document is required")
 }
 
 // DisableCredential POST /admin/credentials/{id}/disable
@@ -350,7 +656,10 @@ func (h *Handlers) DisableCredential(w http.ResponseWriter, r *http.Request, id 
 		Enabled *bool `json:"enabled"`
 		Disable *bool `json:"disable"`
 	}
-	_ = decodeJSON(r, h.maxBody(), &body)
+	if err := decodeJSON(r, h.maxBody(), &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	enabled := false
 	if body.Enabled != nil {
@@ -366,12 +675,18 @@ func (h *Handlers) DisableCredential(w http.ResponseWriter, r *http.Request, id 
 		}
 		enabled = !cur.Enabled
 	}
+	if h.TokenCache != nil {
+		h.TokenCache.Invalidate(id)
+	}
 	updated, err := h.Store.SetCredentialEnabled(id, enabled)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, maskCredential(updated))
+	if h.TokenCache != nil {
+		h.TokenCache.Invalidate(id)
+	}
+	writeJSON(w, http.StatusOK, h.maskedCredential(updated))
 }
 
 // SetPriority PUT /admin/credentials/{id}/priority
@@ -388,7 +703,198 @@ func (h *Handlers) SetPriority(w http.ResponseWriter, r *http.Request, id string
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, maskCredential(updated))
+	writeJSON(w, http.StatusOK, h.maskedCredential(updated))
+}
+
+// SetCredentialProxy PUT /admin/credentials/{id}/proxy.
+func (h *Handlers) SetCredentialProxy(w http.ResponseWriter, r *http.Request, id string) {
+	var body struct {
+		Mode string `json:"mode"`
+		URL  string `json:"url"`
+	}
+	if err := decodeJSON(r, h.maxBody(), &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(body.Mode))
+	proxyURL := strings.TrimSpace(body.URL)
+	switch mode {
+	case "", outbound.ModeInherit:
+		mode = outbound.ModeInherit
+		proxyURL = ""
+	case outbound.ModeDirect:
+		proxyURL = ""
+	case outbound.ModeURL:
+		validated, err := outbound.ValidateProxyURL(proxyURL)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		proxyURL = validated
+	default:
+		writeErr(w, http.StatusBadRequest, "mode must be inherit, direct, or url")
+		return
+	}
+	// Invalidate before and after the storage mutation. The first invalidation
+	// prevents an old-route refresh from committing across the change; the
+	// second invalidates any refresh that began before the new route became
+	// visible.
+	if h.TokenCache != nil {
+		h.TokenCache.Invalidate(id)
+	}
+	updated, err := h.Store.PatchCredential(id, func(credential *storage.Credential) error {
+		credential.ProxyMode = mode
+		credential.ProxyURL = proxyURL
+		return nil
+	})
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if h.TokenCache != nil {
+		h.TokenCache.Invalidate(id)
+	}
+	if h.Outbound != nil {
+		h.Outbound.CloseIdleConnections()
+	}
+	writeJSON(w, http.StatusOK, h.maskedCredential(updated))
+}
+
+// RuntimeSettings GET /admin/settings.
+func (h *Handlers) RuntimeSettings(w http.ResponseWriter, r *http.Request) {
+	if h.Settings == nil {
+		writeErr(w, http.StatusServiceUnavailable, "runtime settings unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, h.maskRuntimeSettings(h.Settings.Current()))
+}
+
+// UpdateRuntimeSettings PUT /admin/settings.
+func (h *Handlers) UpdateRuntimeSettings(w http.ResponseWriter, r *http.Request) {
+	if h.Settings == nil {
+		writeErr(w, http.StatusServiceUnavailable, "runtime settings unavailable")
+		return
+	}
+	var body struct {
+		GlobalProxy  *storage.GlobalProxySettings `json:"global_proxy"`
+		SSOConverter *struct {
+			Enabled       *bool   `json:"enabled"`
+			Endpoint      *string `json:"endpoint"`
+			APIKey        *string `json:"api_key"`
+			ClearAPIKey   bool    `json:"clear_api_key"`
+			AllowInsecure *bool   `json:"allow_insecure_http"`
+			TimeoutSec    *int    `json:"timeout_sec"`
+			MaxBatch      *int    `json:"max_batch"`
+		} `json:"sso_converter"`
+		Inspection *storage.InspectionSettings `json:"inspection"`
+	}
+	if err := decodeJSON(r, h.maxBody(), &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if cache, ok := h.TokenCache.(interface{ InvalidateAll() }); ok {
+		// Retire refreshes that resolved the old global route before the settings
+		// mutation. The post-update invalidation below catches flights that start in
+		// the narrow transition window.
+		cache.InvalidateAll()
+	}
+	updated, err := h.Settings.Update(func(settings *storage.RuntimeSettings) error {
+		if body.GlobalProxy != nil {
+			mode := strings.ToLower(strings.TrimSpace(body.GlobalProxy.Mode))
+			switch mode {
+			case outbound.ModeEnvironment, outbound.ModeDirect:
+				settings.GlobalProxy = storage.GlobalProxySettings{Mode: mode}
+			case outbound.ModeURL:
+				value, err := outbound.ValidateProxyURL(body.GlobalProxy.URL)
+				if err != nil {
+					return err
+				}
+				settings.GlobalProxy = storage.GlobalProxySettings{Mode: mode, URL: value}
+			default:
+				return fmt.Errorf("global_proxy.mode must be environment, direct, or url")
+			}
+		}
+		if converter := body.SSOConverter; converter != nil {
+			if converter.Enabled != nil {
+				settings.SSOConverter.Enabled = *converter.Enabled
+			}
+			if converter.AllowInsecure != nil {
+				settings.SSOConverter.AllowInsecure = *converter.AllowInsecure
+			}
+			if converter.Endpoint != nil {
+				endpoint, err := validateConverterEndpoint(*converter.Endpoint, settings.SSOConverter.AllowInsecure)
+				if err != nil {
+					return err
+				}
+				settings.SSOConverter.Endpoint = endpoint
+			}
+			if converter.ClearAPIKey {
+				settings.SSOConverter.APIKey = ""
+			} else if converter.APIKey != nil && strings.TrimSpace(*converter.APIKey) != "" {
+				settings.SSOConverter.APIKey = strings.TrimSpace(*converter.APIKey)
+			}
+			if converter.TimeoutSec != nil {
+				settings.SSOConverter.TimeoutSec = *converter.TimeoutSec
+			}
+			if converter.MaxBatch != nil {
+				settings.SSOConverter.MaxBatch = *converter.MaxBatch
+			}
+			if settings.SSOConverter.Enabled {
+				endpoint, err := validateConverterEndpoint(settings.SSOConverter.Endpoint, settings.SSOConverter.AllowInsecure)
+				if err != nil {
+					return err
+				}
+				settings.SSOConverter.Endpoint = endpoint
+			}
+		}
+		if body.Inspection != nil {
+			settings.Inspection = *body.Inspection
+		}
+		return settings.Validate()
+	})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if h.Outbound != nil {
+		h.Outbound.CloseIdleConnections()
+	}
+	if cache, ok := h.TokenCache.(interface{ InvalidateAll() }); ok {
+		cache.InvalidateAll()
+	}
+	writeJSON(w, http.StatusOK, h.maskRuntimeSettings(updated))
+}
+
+// InspectionStatus GET /admin/inspection.
+func (h *Handlers) InspectionStatus(w http.ResponseWriter, r *http.Request) {
+	if h.Inspection == nil {
+		writeErr(w, http.StatusServiceUnavailable, "credential inspection unavailable")
+		return
+	}
+	last, ok := h.Inspection.Last()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"running": h.Inspection.Running(),
+		"has_run": ok,
+		"last":    last,
+	})
+}
+
+// RunInspection POST /admin/inspection/run.
+func (h *Handlers) RunInspection(w http.ResponseWriter, r *http.Request) {
+	if h.Inspection == nil {
+		writeErr(w, http.StatusServiceUnavailable, "credential inspection unavailable")
+		return
+	}
+	summary, err := h.Inspection.RunOnce(r.Context())
+	if err != nil {
+		if strings.Contains(err.Error(), "already in progress") {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 // RefreshCredential POST /admin/credentials/{id}/refresh
@@ -402,7 +908,7 @@ func (h *Handlers) RefreshCredential(w http.ResponseWriter, r *http.Request, id 
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, maskCredential(cred))
+	writeJSON(w, http.StatusOK, h.maskedCredential(cred))
 }
 
 // CredentialBilling GET /admin/credentials/{id}/billing
@@ -421,9 +927,18 @@ func (h *Handlers) CredentialBilling(w http.ResponseWriter, r *http.Request, id 
 
 // DeleteCredential DELETE /admin/credentials/{id}
 func (h *Handlers) DeleteCredential(w http.ResponseWriter, r *http.Request, id string) {
+	// Retire an in-flight refresh before deletion so it cannot persist token
+	// material into the disappearing credential. Invalidate again afterwards to
+	// remove any cache result committed in the narrow delete window.
+	if h.TokenCache != nil {
+		h.TokenCache.Invalidate(id)
+	}
 	if err := h.Store.DeleteCredential(id); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
+	}
+	if h.TokenCache != nil {
+		h.TokenCache.Invalidate(id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
 }
@@ -443,7 +958,10 @@ func (h *Handlers) CreateClient(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
 	}
-	_ = decodeJSON(r, h.maxBody(), &body)
+	if err := decodeJSON(r, h.maxBody(), &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	res, err := h.Store.CreateClient(body.Name)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -490,6 +1008,37 @@ func (h *Handlers) System(w http.ResponseWriter, r *http.Request) {
 		"limits": h.Config.Limits,
 		"pool":   summarizePool(credentials, time.Now()),
 	})
+}
+
+func (h *Handlers) maskRuntimeSettings(settings storage.RuntimeSettings) map[string]any {
+	proxyMode := settings.GlobalProxy.Mode
+	proxyURL := outbound.RedactedURL(settings.GlobalProxy.URL)
+	proxySource := "runtime"
+	if h != nil && h.ProxyResolver != nil {
+		if resolved, err := h.ProxyResolver.Resolve(nil); err == nil {
+			proxyMode, proxyURL, proxySource = resolved.Mode, outbound.RedactedURL(resolved.URL), resolved.Source
+		}
+	}
+	return map[string]any{
+		"global_proxy": map[string]any{
+			"mode":   proxyMode,
+			"url":    proxyURL,
+			"source": proxySource,
+		},
+		"sso_converter": map[string]any{
+			"enabled":             settings.SSOConverter.Enabled,
+			"endpoint":            settings.SSOConverter.Endpoint,
+			"api_key_configured":  strings.TrimSpace(settings.SSOConverter.APIKey) != "",
+			"allow_insecure_http": settings.SSOConverter.AllowInsecure,
+			"timeout_sec":         settings.SSOConverter.TimeoutSec,
+			"max_batch":           settings.SSOConverter.MaxBatch,
+		},
+		"inspection": settings.Inspection,
+	}
+}
+
+func validateConverterEndpoint(raw string, allowInsecure bool) (string, error) {
+	return sso.ValidateEndpoint(raw, allowInsecure)
 }
 
 func decodeJSON(r *http.Request, max int64, dest any) error {

@@ -20,6 +20,44 @@ func TestEmbeddedStaticFilesPresent(t *testing.T) {
 	}
 }
 
+func TestBillingDiagnosticsPreserveMissingValues(t *testing.T) {
+	app, err := ReadStatic("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(app)
+	for _, marker := range []string{
+		"var limit = optionalNum(m.monthlyLimit)",
+		"var weekPct = optionalNum(w.creditUsagePercent)",
+		`u.used != null ? fmtNum(u.used) : "未报告"`,
+		`u.weekPct != null ? u.weekPct.toFixed(1) + "%" : "未报告"`,
+	} {
+		if !strings.Contains(source, marker) {
+			t.Fatalf("app.js missing billing null-preservation marker %q", marker)
+		}
+	}
+}
+
+func TestCredentialCardsExposeInspectionResult(t *testing.T) {
+	app, err := ReadStatic("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(app)
+	for _, marker := range []string{
+		"c.last_inspection_at",
+		"c.last_inspection_status",
+		"c.last_inspection_error",
+		`lineMeta("最近巡检"`,
+		`lineMeta("巡检结果"`,
+		`lineMeta("巡检详情"`,
+	} {
+		if !strings.Contains(source, marker) {
+			t.Fatalf("app.js missing credential inspection marker %q", marker)
+		}
+	}
+}
+
 func TestIndexHandlerServesHTMLWithoutAuth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	rec := httptest.NewRecorder()

@@ -14,13 +14,127 @@ import (
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/auth"
 	"github.com/GreyGunG/grokbuild-proxy/internal/config"
+	"github.com/GreyGunG/grokbuild-proxy/internal/importer"
+	"github.com/GreyGunG/grokbuild-proxy/internal/outbound"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 )
 
+type fixedProxyResolver struct{ resolved outbound.ResolvedProxy }
+
+func (r fixedProxyResolver) Resolve(*storage.Credential) (outbound.ResolvedProxy, error) {
+	return r.resolved, nil
+}
+
+type recordingTokenInvalidator struct {
+	mu   sync.Mutex
+	keys []string
+}
+
+func (r *recordingTokenInvalidator) Invalidate(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.keys = append(r.keys, key)
+}
+
+func (r *recordingTokenInvalidator) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.keys...)
+}
+
+func TestManualCredentialDeleteInvalidatesRefreshBeforeAndAfter(t *testing.T) {
+	store := newFakeStore()
+	store.creds["delete-me"] = storage.Credential{ID: "delete-me", Enabled: true}
+	invalidator := &recordingTokenInvalidator{}
+	h := &Handlers{Store: store, TokenCache: invalidator}
+	recorder := httptest.NewRecorder()
+	h.DeleteCredential(recorder, httptest.NewRequest(http.MethodDelete, "/", nil), "delete-me")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := invalidator.snapshot(); len(got) != 2 || got[0] != "delete-me" || got[1] != "delete-me" {
+		t.Fatalf("invalidations=%v", got)
+	}
+}
+
+func TestExplicitCredentialEnableInvalidatesRefreshBeforeAndAfter(t *testing.T) {
+	store := newFakeStore()
+	store.creds["enable-me"] = storage.Credential{ID: "enable-me", Enabled: false}
+	invalidator := &recordingTokenInvalidator{}
+	h := &Handlers{Store: store, TokenCache: invalidator}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"enabled":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	h.DisableCredential(recorder, req, "enable-me")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := invalidator.snapshot(); len(got) != 2 || got[0] != "enable-me" || got[1] != "enable-me" {
+		t.Fatalf("invalidations=%v", got)
+	}
+}
+
+func TestCreateCredentialReturnsConflictForDuplicateIdentity(t *testing.T) {
+	store := newFakeStore()
+	store.createErr = fmt.Errorf("%w: cred-existing", storage.ErrCredentialExists)
+	h := &Handlers{Store: store}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials", strings.NewReader(`{"refresh_token":"duplicate"}`))
+	req.Header.Set("Content-Type", "application/json")
+	h.CreateCredential(recorder, req)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestMalformedDisableBodyDoesNotToggleCredential(t *testing.T) {
+	store := newFakeStore()
+	store.creds["cred"] = storage.Credential{ID: "cred", Enabled: false, ManualDisabled: true}
+	h := &Handlers{Store: store}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials/cred/disable", strings.NewReader(`{"enabled":`))
+	h.DisableCredential(recorder, req, "cred")
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	credential, _ := store.GetCredential("cred")
+	if credential.Enabled {
+		t.Fatalf("malformed body toggled credential: %+v", credential)
+	}
+}
+
+func TestMalformedCreateClientBodyDoesNotCreateKey(t *testing.T) {
+	store := newFakeStore()
+	h := &Handlers{Store: store}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/clients", strings.NewReader(`{"name":`))
+	h.CreateClient(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	clients, err := store.ListClients()
+	if err != nil || len(clients) != 0 {
+		t.Fatalf("clients=%d err=%v", len(clients), err)
+	}
+}
+
+func TestMaskedCredentialIncludesEffectiveRedactedProxy(t *testing.T) {
+	h := &Handlers{ProxyResolver: fixedProxyResolver{resolved: outbound.ResolvedProxy{Mode: outbound.ModeURL, Source: "runtime", URL: "http://user:secret@proxy.test:8080"}}}
+	view := h.maskedCredential(storage.Credential{ProxyMode: outbound.ModeInherit})
+	if view.EffectiveProxy["mode"] != outbound.ModeURL || view.EffectiveProxy["source"] != "runtime" {
+		t.Fatalf("proxy=%v", view.EffectiveProxy)
+	}
+	url, _ := view.EffectiveProxy["url"].(string)
+	if strings.Contains(url, "secret") || !strings.Contains(url, "redacted") {
+		t.Fatalf("url=%q", url)
+	}
+}
+
 type fakeStore struct {
-	mu    sync.Mutex
-	creds map[string]storage.Credential
-	cli   map[string]storage.ClientKey
+	mu        sync.Mutex
+	creds     map[string]storage.Credential
+	cli       map[string]storage.ClientKey
+	createErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -53,6 +167,9 @@ func (f *fakeStore) GetCredential(id string) (storage.Credential, error) {
 func (f *fakeStore) CreateCredential(in storage.CreateCredentialInput) (storage.Credential, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.createErr != nil {
+		return storage.Credential{}, f.createErr
+	}
 	id := "cred_test1"
 	now := time.Now().UTC().Truncate(time.Second)
 	en := true
@@ -114,6 +231,17 @@ func (f *fakeStore) SetCredentialPriority(id string, priority int) (storage.Cred
 		return storage.Credential{}, err
 	}
 	c.Priority = priority
+	return f.UpdateCredential(c)
+}
+
+func (f *fakeStore) PatchCredential(id string, mutate func(*storage.Credential) error) (storage.Credential, error) {
+	c, err := f.GetCredential(id)
+	if err != nil {
+		return storage.Credential{}, err
+	}
+	if err := mutate(&c); err != nil {
+		return storage.Credential{}, err
+	}
 	return f.UpdateCredential(c)
 }
 
@@ -236,13 +364,26 @@ func TestMaskSecret(t *testing.T) {
 	}
 }
 
+func TestValidateConverterEndpointRejectsPublicInsecureHTTP(t *testing.T) {
+	if _, err := validateConverterEndpoint("http://sso-import:8090", true); err != nil {
+		t.Fatalf("Compose-internal endpoint rejected: %v", err)
+	}
+	if _, err := validateConverterEndpoint("http://converter.example.com:8090", true); err == nil {
+		t.Fatal("public insecure endpoint must be rejected")
+	}
+}
+
 func TestImportGrokIsIdempotent(t *testing.T) {
 	store, err := storage.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	h := &Handlers{Store: store}
+	imports, err := importer.NewManager(store, nil, importer.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handlers{Store: store, Imports: imports, Config: config.Default()}
 	body := `{"raw":{
 		"https://auth.x.ai::client-test":{
 			"key":"access-one",
@@ -276,6 +417,181 @@ func TestImportGrokIsIdempotent(t *testing.T) {
 	}
 	if response["updated"] != float64(1) || response["created"] != float64(0) {
 		t.Fatalf("response=%v", response)
+	}
+}
+
+func TestImportGrokUsesImporterQueueAndCompatibilityResponse(t *testing.T) {
+	imports := &fakeImportJobs{job: importer.Job{ID: "legacy", Status: importer.StatusCompleted, Created: 1}}
+	imports.job.Results = []importer.ItemResult{{
+		Source: "file-1/entry-1", Status: "created", CredentialID: "credential-one",
+	}}
+	store := newFakeStore()
+	store.creds["credential-one"] = storage.Credential{ID: "credential-one", Name: "imported", Enabled: true}
+	h := &Handlers{Store: store, Imports: imports, Config: config.Default()}
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials/import-grok", strings.NewReader(`{"raw":{"key":"access","refresh_token":"refresh"}}`))
+	rr := httptest.NewRecorder()
+	h.ImportGrok(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(imports.files) != 1 || imports.files[0].Format != importer.FormatJSON {
+		t.Fatalf("legacy route bypassed importer: %+v", imports.files)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["imported"] != float64(1) || response["created"] != float64(1) || response["job_id"] != "legacy" {
+		t.Fatalf("response=%v", response)
+	}
+}
+
+func TestImportGrokQueueOverloadReturns429(t *testing.T) {
+	imports := &fakeImportJobs{err: fmt.Errorf("%w: retry later", importer.ErrOverloaded)}
+	h := &Handlers{Store: newFakeStore(), Imports: imports, Config: config.Default()}
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials/import-grok", strings.NewReader(`{"raw":{"key":"access"}}`))
+	rr := httptest.NewRecorder()
+	h.ImportGrok(rr, req)
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") != "1" {
+		t.Fatalf("status=%d retry-after=%q body=%s", rr.Code, rr.Header().Get("Retry-After"), rr.Body.String())
+	}
+}
+
+func TestImportGrokEnforcesManagerEntryLimit(t *testing.T) {
+	store, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	imports, err := importer.NewManager(store, nil, importer.Limits{MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handlers{Store: store, Imports: imports, Config: config.Default()}
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials/import-grok", strings.NewReader(`{
+		"raw":[
+			{"key":"access-one","user_id":"one"},
+			{"key":"access-two","user_id":"two"}
+		]
+	}`))
+	rr := httptest.NewRecorder()
+	h.ImportGrok(rr, req)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "entry limit exceeded") {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	credentials, err := store.ListCredentials()
+	if err != nil || len(credentials) != 0 {
+		t.Fatalf("credentials=%+v err=%v", credentials, err)
+	}
+}
+
+func TestImportGrokCancellationReturnsAsyncJobLocation(t *testing.T) {
+	imports := &fakeImportJobs{}
+	h := &Handlers{Store: newFakeStore(), Imports: imports, Config: config.Default()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/admin/credentials/import-grok", strings.NewReader(`{"raw":{"key":"access"}}`)).WithContext(ctx)
+	rr := httptest.NewRecorder()
+	h.ImportGrok(rr, req)
+	if rr.Code != http.StatusAccepted || rr.Header().Get("Location") != "/admin/import-jobs/import_test" {
+		t.Fatalf("status=%d location=%q body=%s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+}
+
+type fakeImportJobs struct {
+	files []importer.InputFile
+	job   importer.Job
+	err   error
+}
+
+func (f *fakeImportJobs) Start(files []importer.InputFile) (importer.Job, error) {
+	f.files = append([]importer.InputFile(nil), files...)
+	if f.err != nil {
+		return importer.Job{}, f.err
+	}
+	if f.job.ID == "" {
+		f.job = importer.Job{ID: "import_test", Status: importer.StatusQueued}
+	}
+	return f.job, nil
+}
+
+func TestCredentialImportQueueOverloadReturns429(t *testing.T) {
+	imports := &fakeImportJobs{err: fmt.Errorf("%w: retry later", importer.ErrOverloaded)}
+	h := &Handlers{Store: newFakeStore(), Imports: imports, AdminKey: "sk-admin-import-test", Config: config.Default()}
+	req := httptest.NewRequest(http.MethodPost, "/admin/credential-imports", strings.NewReader(`{"name":"pasted.txt","text":"sso-value"}`))
+	req.Header.Set("Authorization", "Bearer sk-admin-import-test")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") != "1" {
+		t.Fatalf("status=%d retry-after=%q body=%s", rr.Code, rr.Header().Get("Retry-After"), rr.Body.String())
+	}
+}
+
+func (f *fakeImportJobs) Get(id string) (importer.Job, bool) {
+	if id != f.job.ID {
+		return importer.Job{}, false
+	}
+	return f.job, true
+}
+
+func TestCredentialImportRouteAliases(t *testing.T) {
+	for _, collectionPath := range []string{"/admin/import-jobs", "/admin/credential-imports"} {
+		t.Run(collectionPath, func(t *testing.T) {
+			imports := &fakeImportJobs{}
+			h := &Handlers{
+				Store:    newFakeStore(),
+				Imports:  imports,
+				AdminKey: "sk-admin-import-test",
+				Config:   config.Default(),
+			}
+			handler := h.Handler()
+
+			req := httptest.NewRequest(http.MethodPost, collectionPath, strings.NewReader(`{
+				"name":"pasted.txt","format":"sso","text":"sso-value"
+			}`))
+			req.Header.Set("Authorization", "Bearer sk-admin-import-test")
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusAccepted {
+				t.Fatalf("POST status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			location := collectionPath + "/import_test"
+			if rr.Header().Get("Location") != location {
+				t.Fatalf("Location=%q want=%q", rr.Header().Get("Location"), location)
+			}
+			if len(imports.files) != 1 || imports.files[0].Name != "pasted.txt" ||
+				imports.files[0].Format != importer.FormatSSO || string(imports.files[0].Data) != "sso-value" {
+				t.Fatalf("files=%+v", imports.files)
+			}
+
+			getReq := httptest.NewRequest(http.MethodGet, location, nil)
+			getReq.Header.Set("Authorization", "Bearer sk-admin-import-test")
+			getRR := httptest.NewRecorder()
+			handler.ServeHTTP(getRR, getReq)
+			if getRR.Code != http.StatusOK {
+				t.Fatalf("GET status=%d body=%s", getRR.Code, getRR.Body.String())
+			}
+		})
+	}
+}
+
+func TestCredentialImportRejectsBodyBeforeCompleteRead(t *testing.T) {
+	imports := &fakeImportJobs{}
+	cfg := config.Default()
+	cfg.Import.MaxTotalBytes = 32
+	h := &Handlers{Store: newFakeStore(), Imports: imports, AdminKey: "sk-admin-import-test", Config: cfg}
+	req := httptest.NewRequest(http.MethodPost, "/admin/import-jobs", strings.NewReader(`{"name":"large","text":"this request is definitely larger than thirty two bytes"}`))
+	req.Header.Set("Authorization", "Bearer sk-admin-import-test")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(imports.files) != 0 {
+		t.Fatalf("import manager received files: %+v", imports.files)
 	}
 }
 
@@ -313,11 +629,13 @@ func TestDeviceCodeAdminFlow(t *testing.T) {
 	}
 	defer store.Close()
 	oauth := &fakeDeviceOAuth{}
+	invalidator := &recordingTokenInvalidator{}
 	h := &Handlers{
-		Store:    store,
-		OAuth:    oauth,
-		AdminKey: "sk-admin-device-test",
-		Config:   config.Default(),
+		Store:      store,
+		OAuth:      oauth,
+		TokenCache: invalidator,
+		AdminKey:   "sk-admin-device-test",
+		Config:     config.Default(),
 	}
 	handler := h.Handler()
 	adminRequest := func(path, body string) *httptest.ResponseRecorder {
@@ -358,6 +676,9 @@ func TestDeviceCodeAdminFlow(t *testing.T) {
 	creds, err := store.ListCredentials()
 	if err != nil || len(creds) != 1 || creds[0].RefreshToken != "device-refresh" {
 		t.Fatalf("credentials=%+v err=%v", creds, err)
+	}
+	if got := invalidator.snapshot(); len(got) != 1 || got[0] != creds[0].ID {
+		t.Fatalf("device upsert invalidations=%v credential=%q", got, creds[0].ID)
 	}
 }
 

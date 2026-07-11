@@ -12,8 +12,39 @@ services:
     environment:
       LISTEN: "0.0.0.0:8080"
       ALLOW_PUBLIC_LISTEN: "true"
+    networks:
+      - app
+      - sso-internal
     # Prefer binding only to loopback on the host (see ports above).
     # Do not expose this proxy to untrusted networks.
 
+  sso-import:
+    profiles: ["sso-import"]
+    build: ./grok2api-sso-to-grokbuild
+    image: grokbuild-sso-import:local
+    restart: unless-stopped
+    environment:
+      SSO_CONVERTER_API_TOKEN: "${SSO_CONVERTER_API_TOKEN:-}"
+      SSO_CONVERTER_HOST: "0.0.0.0"
+      SSO_CONVERTER_PORT: "8090"
+      SSO_CONVERTER_MAX_ITEMS: "${SSO_CONVERTER_MAX_ITEMS:-50}"
+      SSO_CONVERTER_MAX_INFLIGHT_REQUESTS: "${SSO_CONVERTER_MAX_INFLIGHT_REQUESTS:-4}"
+      SSO_CONVERTER_PROXY: "${SSO_CONVERTER_PROXY:-}"
+    expose:
+      - "8090"
+    networks:
+      - sso-internal
+      - sso-egress
+    # No host port is published. grokbuild-proxy reaches this service only at
+    # http://sso-import:8090 over the internal Compose network.
+
 volumes:
   grokbuild-data:
+
+networks:
+  app:
+  sso-internal:
+    internal: true
+  # Dedicated outbound network lets the converter reach x.ai without exposing
+  # its HTTP listener on the host or the proxy's application network.
+  sso-egress:

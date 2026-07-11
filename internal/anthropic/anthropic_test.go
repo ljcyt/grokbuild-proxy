@@ -806,6 +806,26 @@ func TestSessionIDFromHeader(t *testing.T) {
 	}
 }
 
+func TestHandleMessagesRejectsOversizedSessionID(t *testing.T) {
+	called := false
+	h := &Handlers{
+		Cfg: config.Default().Anthropic,
+		Post: func(context.Context, string, string, []byte, bool) (*http.Response, error) {
+			called = true
+			return nil, nil
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-4","max_tokens":16,"messages":[{"role":"user","content":"hi"}]
+	}`))
+	req.Header.Set("x-claude-code-session-id", strings.Repeat("x", 513))
+	rr := httptest.NewRecorder()
+	h.HandleMessages(rr, req)
+	if rr.Code != http.StatusBadRequest || called {
+		t.Fatalf("status=%d called=%v body=%s", rr.Code, called, rr.Body.String())
+	}
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s

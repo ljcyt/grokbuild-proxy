@@ -1,6 +1,10 @@
 package lb
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"time"
+)
 
 const maxStickyBindings = 10_000
 
@@ -16,6 +20,7 @@ func (s *Selector) getSticky(key string, now time.Time) (credID string, ok bool)
 	if key == "" || s.stickyTTL <= 0 {
 		return "", false
 	}
+	key = stickyMapKey(key)
 	b, exists := s.sticky[key]
 	if !exists {
 		return "", false
@@ -33,24 +38,29 @@ func (s *Selector) bindSticky(key, credID string, now time.Time) {
 	if key == "" || credID == "" || s.stickyTTL <= 0 {
 		return
 	}
-	if len(s.sticky) >= maxStickyBindings {
-		s.pruneSticky(now)
-	}
-	if _, exists := s.sticky[key]; !exists && len(s.sticky) >= maxStickyBindings {
-		var oldestKey string
-		var oldestExpiry time.Time
-		for candidate, binding := range s.sticky {
-			if oldestKey == "" || binding.ExpiresAt.Before(oldestExpiry) {
-				oldestKey = candidate
-				oldestExpiry = binding.ExpiresAt
-			}
+	key = stickyMapKey(key)
+	if _, exists := s.sticky[key]; !exists {
+		if len(s.stickySlots) < maxStickyBindings {
+			s.stickySlots = append(s.stickySlots, key)
+		} else {
+			// Fixed-size ring eviction keeps attacker-controlled unique keys O(1)
+			// after capacity is reached. Slots may reference entries removed by TTL
+			// or credential invalidation; deleting a missing key is harmless.
+			old := s.stickySlots[s.stickyCursor]
+			delete(s.sticky, old)
+			s.stickySlots[s.stickyCursor] = key
+			s.stickyCursor = (s.stickyCursor + 1) % len(s.stickySlots)
 		}
-		delete(s.sticky, oldestKey)
 	}
 	s.sticky[key] = stickyBinding{
 		CredID:    credID,
 		ExpiresAt: now.Add(s.stickyTTL),
 	}
+}
+
+func stickyMapKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
 }
 
 // pruneSticky removes expired bindings. Caller must hold s.mu.

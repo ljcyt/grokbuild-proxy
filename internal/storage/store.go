@@ -15,8 +15,13 @@ const (
 	credentialsFile = "credentials.json"
 	clientsFile     = "clients.json"
 	metaFile        = "meta.json"
+	settingsFile    = "settings.json"
 	fileMode        = 0o600
 	dirMode         = 0o700
+
+	// Bounds how long an in-place external edit that preserves size, timestamp,
+	// and file identity can remain hidden by the credential cache.
+	credentialCacheMaxAge = time.Second
 )
 
 // Store is a mutex + flock protected JSON file store under DataDir.
@@ -25,6 +30,51 @@ type Store struct {
 
 	mu   sync.Mutex
 	lock *os.File
+
+	// credentialsCache and credentialsIndex are guarded by mu. The instance
+	// lock guarantees this process is the only Store writer, while the file
+	// stamp invalidates the cache after ordinary operator edits or replacements.
+	// Keeping both the original slice and a first-ID index preserves malformed
+	// duplicate-ID file behavior while making repeated guards O(1).
+	credentialsCache      []Credential
+	credentialsIndex      map[string]Credential
+	credentialsCacheStamp fileStamp
+	credentialsCacheValid bool
+	credentialsCacheAt    time.Time
+}
+
+type fileStamp struct {
+	exists           bool
+	size             int64
+	modifiedUnixNano int64
+	info             os.FileInfo
+}
+
+func statFileStamp(path string) (fileStamp, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fileStamp{}, nil
+		}
+		return fileStamp{}, err
+	}
+	return fileStamp{
+		exists:           true,
+		size:             info.Size(),
+		modifiedUnixNano: info.ModTime().UnixNano(),
+		info:             info,
+	}, nil
+}
+
+func sameFileStamp(left, right fileStamp) bool {
+	if left.exists != right.exists || left.size != right.size ||
+		left.modifiedUnixNano != right.modifiedUnixNano {
+		return false
+	}
+	if !left.exists {
+		return true
+	}
+	return left.info != nil && right.info != nil && os.SameFile(left.info, right.info)
 }
 
 // New creates a Store rooted at dir. The directory is created with mode 0700.
@@ -131,6 +181,10 @@ func (s *Store) clientsPath() string {
 
 func (s *Store) metaPath() string {
 	return filepath.Join(s.dir, metaFile)
+}
+
+func (s *Store) settingsPath() string {
+	return filepath.Join(s.dir, settingsFile)
 }
 
 // withLock serializes all store operations with process-local mutex and

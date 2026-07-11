@@ -1,5 +1,9 @@
 listen: "127.0.0.1:8080"
 allow_public_listen: false
+# Exact hosts allowed to serve /admin and /admin/* in addition to localhost and
+# loopback IPs. Required for a public bind or reverse-proxy hostname; ports are
+# optional and X-Forwarded-Host is never trusted.
+admin_trusted_hosts: []
 data_dir: "./data"
 api_key: ""
 admin_key: ""
@@ -42,6 +46,48 @@ lb:
   cooldown:
     base_sec: 300
     max_sec: 3600
+# 默认出站路由。Admin 运行时设置会覆盖这里的值。
+# mode: environment | direct | url
+proxy:
+  mode: environment
+  url: ""
+# 可选的 SSO -> OIDC 转换服务。未启用时 JSON 凭证导入仍可使用。
+sso_converter:
+  enabled: false
+  endpoint: "http://sso-import:8090"
+  api_key: ""
+  # 明文 HTTP 仅用于 loopback 或受信任的容器私网地址。
+  allow_insecure_http: true
+  # 单次 sidecar 请求范围为 1-300 秒。
+  timeout_sec: 300
+  # 不得超过 sidecar 的 100 条硬上限。
+  max_batch: 50
+# 自动巡检默认关闭；401 会刷新并复查，429/网络错误不会隔离。
+inspection:
+  enabled: false
+  interval_sec: 3600
+  initial_delay_sec: 30
+  timeout_sec: 30
+  concurrency: 2
+  confirm_unauthorized: 2
+  # 0 表示永不自动物理删除隔离凭证。
+  purge_after_sec: 0
+  mass_failure_minimum: 3
+  mass_failure_ratio: 0.5
+  skip_recent_success_sec: 900
+  # 每轮最多处理固定数量，避免大量同时过期凭证造成文件存储写放大；跨轮轮转。
+  max_credentials_per_run: 100
+# 批量导入任务边界。
+import:
+  max_files: 100
+  max_file_bytes: 4194304
+  max_total_bytes: 16777216
+  max_entries: 1000
+  max_queued_jobs: 32
+  max_queued_bytes: 67108864
+  max_retained_jobs: 128
+  max_retained_bytes: 67108864
+  job_ttl_min: 30
 limits:
   max_body_bytes: 20971520
   request_timeout_sec: 600

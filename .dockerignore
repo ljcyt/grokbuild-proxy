@@ -11,6 +11,15 @@
 .github
 .github/**
 
+# Local reference bundles are inputs for development only. They can contain
+# credentials and must never be sent to either Docker builder.
+*.zip
+grok_reg-share-*/
+grok2api-sso-to-grokbuild/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+
 config.yaml
 config.yml
 *.local.yaml

@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+const MaxPromptCacheKeyBytes = 512
+
 // SanitizeResult is the sanitized Responses payload plus extracted model.
 type SanitizeResult struct {
 	Body  map[string]any
@@ -119,6 +121,9 @@ func SanitizeResponses(body any, convID string) (*SanitizeResult, error) {
 	if pck == "" && convID != "" {
 		obj["prompt_cache_key"] = convID
 		pck = convID
+	}
+	if len(pck) > MaxPromptCacheKeyBytes {
+		return nil, fmt.Errorf("openai sanitize: prompt_cache_key must be at most %d bytes", MaxPromptCacheKeyBytes)
 	}
 
 	model := strings.TrimSpace(asString(obj["model"]))

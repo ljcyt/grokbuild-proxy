@@ -47,9 +47,11 @@ type Selector struct {
 	// priorityRR is per-priority round-robin cursors (strategy=priority_rr).
 	priorityRR map[int]int
 
-	sticky map[string]stickyBinding
-	states map[string]*runtimeState
-	store  healthStore
+	sticky       map[string]stickyBinding
+	stickySlots  []string
+	stickyCursor int
+	states       map[string]*runtimeState
+	store        healthStore
 }
 
 // SetHealthStore enables durable failure/cooldown state. It returns s for

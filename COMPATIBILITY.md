@@ -85,6 +85,27 @@ Native Responses preserves encrypted reasoning verbatim. The Anthropic surface
 wraps the same Grok blob as a CPA-style opaque signature and unwraps it on
 replay; it does not decrypt or reinterpret the content.
 
+## Admin and credential operations
+
+| Capability | Status |
+|---|---|
+| Grok CLI auth JSON import | Supported |
+| Repeated files, raw JSON/text, duplicate top-level JSON keys | Supported |
+| CPA credential JSON (`type=xai`) | Supported |
+| Optional SSO text conversion | Supported through protected sidecar |
+| Atomic stable-identity bulk upsert | Supported |
+| Global and credential-specific direct/HTTP(S)/SOCKS routing | Supported |
+| Scheduled/manual inspection with 401 confirmation | Supported |
+| 429 cooldown without quarantine | Supported |
+| Quarantine recovery after token rotation | Supported |
+| Automatic physical cleanup | Optional; disabled by default |
+| Grok Build shared weekly quota view | Supported when upstream reports it |
+| Monthly/API billing diagnostics | Preserved as diagnostic data |
+
+Upstream quota fields are not guaranteed for every account. Missing values are
+reported as “not reported” and are not converted to numeric zero. A GrokBuild
+product percentage is its contribution to the shared pool, not a separate cap.
+
 ## Upstream and terms
 
 This project is unofficial and is not affiliated with xAI, Grok, Anthropic, or

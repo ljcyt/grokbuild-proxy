@@ -152,7 +152,7 @@ func TestGetBilling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.MonthlyLimit != 4000 || m.Used != 1421 {
+	if m.MonthlyLimit == nil || *m.MonthlyLimit != 4000 || m.Used == nil || *m.Used != 1421 {
 		t.Fatalf("%+v", m)
 	}
 	if m.RemainingCredits() != 4000-1421 {
@@ -165,7 +165,7 @@ func TestGetBilling(t *testing.T) {
 	if snap.Monthly == nil || snap.Weekly == nil {
 		t.Fatalf("snap=%+v sawCredits=%v", snap, sawCredits)
 	}
-	if snap.Weekly.CreditUsagePercent != 36 {
+	if snap.Weekly.CreditUsagePercent == nil || *snap.Weekly.CreditUsagePercent != 36 {
 		t.Errorf("weekly=%+v", snap.Weekly)
 	}
 }
@@ -176,7 +176,7 @@ func TestParseMonthlyBilling_NestedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.MonthlyLimit != 100 || m.Used != 10 {
+	if m.MonthlyLimit == nil || *m.MonthlyLimit != 100 || m.Used == nil || *m.Used != 10 {
 		t.Fatalf("%+v", m)
 	}
 }
@@ -188,7 +188,7 @@ func TestParseMonthlyBilling_ConfigValWrapper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.MonthlyLimit != 20000 || m.Used != 2704 {
+	if m.MonthlyLimit == nil || *m.MonthlyLimit != 20000 || m.Used == nil || *m.Used != 2704 {
 		t.Fatalf("limit/used: %+v", m)
 	}
 	if m.BillingPeriodStart == "" || m.BillingPeriodEnd == "" {
@@ -205,7 +205,7 @@ func TestParseWeeklyCredits_ConfigValWrapper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.CreditUsagePercent != 66 {
+	if w.CreditUsagePercent == nil || *w.CreditUsagePercent != 66 {
 		t.Fatalf("percent=%v", w.CreditUsagePercent)
 	}
 	if w.BillingPeriodEnd == "" {
@@ -213,6 +213,122 @@ func TestParseWeeklyCredits_ConfigValWrapper(t *testing.T) {
 	}
 	if len(w.ProductUsage) == 0 {
 		t.Fatal("expected productUsage")
+	}
+}
+
+func TestBillingDistinguishesZeroFromMissingAndKeepsRaw(t *testing.T) {
+	m, err := ParseMonthlyBilling([]byte(`{"monthlyLimit":0,"extra":"kept"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.MonthlyLimit == nil || *m.MonthlyLimit != 0 || m.Used != nil {
+		t.Fatalf("monthly=%+v", m)
+	}
+	if string(m.Raw["extra"]) != `"kept"` {
+		t.Fatalf("raw=%v", m.Raw)
+	}
+	w, err := ParseWeeklyCredits([]byte(`{"productUsage":[{"product":"GrokBuild","usagePercent":0,"extra":1}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.CreditUsagePercent != nil || len(w.ProductUsage) != 1 || w.ProductUsage[0].UsagePercent == nil || *w.ProductUsage[0].UsagePercent != 0 {
+		t.Fatalf("weekly=%+v", w)
+	}
+	if _, ok := w.ProductUsage[0].Raw["extra"]; !ok {
+		t.Fatalf("product raw=%v", w.ProductUsage[0].Raw)
+	}
+	nested, err := ParseWeeklyCredits([]byte(`{"trace":"outer","config":{"creditUsagePercent":1,"unknown":"inner"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(nested.Raw["trace"]) != `"outer"` || len(nested.Raw["config"]) == 0 {
+		t.Fatalf("nested root shape was not preserved: raw=%v", nested.Raw)
+	}
+}
+
+func TestBillingParsersRejectInvalidOrNonObjectJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		parse func([]byte) error
+		raw   string
+	}{
+		{"monthly invalid", func(raw []byte) error { _, err := ParseMonthlyBilling(raw); return err }, `{"used":`},
+		{"monthly array", func(raw []byte) error { _, err := ParseMonthlyBilling(raw); return err }, `[]`},
+		{"monthly null", func(raw []byte) error { _, err := ParseMonthlyBilling(raw); return err }, `null`},
+		{"monthly invalid config", func(raw []byte) error { _, err := ParseMonthlyBilling(raw); return err }, `{"config":[]}`},
+		{"weekly invalid", func(raw []byte) error { _, err := ParseWeeklyCredits(raw); return err }, `not-json`},
+		{"weekly scalar", func(raw []byte) error { _, err := ParseWeeklyCredits(raw); return err }, `42`},
+		{"weekly invalid config", func(raw []byte) error { _, err := ParseWeeklyCredits(raw); return err }, `{"config":null}`},
+		{"monthly numeric suffix", func(raw []byte) error { _, err := ParseMonthlyBilling(raw); return err }, `{"used":"42junk"}`},
+		{"weekly non-finite", func(raw []byte) error { _, err := ParseWeeklyCredits(raw); return err }, `{"creditUsagePercent":"NaN"}`},
+		{"weekly product object", func(raw []byte) error { _, err := ParseWeeklyCredits(raw); return err }, `{"productUsage":{"product":"GrokBuild"}}`},
+		{"weekly product scalar", func(raw []byte) error { _, err := ParseWeeklyCredits(raw); return err }, `{"productUsage":[42]}`},
+		{"weekly product non-finite", func(raw []byte) error { _, err := ParseWeeklyCredits(raw); return err }, `{"productUsage":[{"product":"GrokBuild","usagePercent":"Inf"}]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.parse([]byte(tt.raw)); err == nil {
+				t.Fatalf("accepted invalid billing payload %s", tt.raw)
+			}
+		})
+	}
+}
+
+func TestBillingClientsReturnParseErrorForInvalid200Payload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+	client := NewClient(Config{BaseURL: server.URL, HTTPClient: server.Client()})
+	if _, err := client.GetBilling(context.Background(), "token"); err == nil || !strings.Contains(err.Error(), "expected JSON object") {
+		t.Fatalf("monthly error=%v", err)
+	}
+	if _, err := client.GetBillingCredits(context.Background(), "token"); err == nil || !strings.Contains(err.Error(), "expected JSON object") {
+		t.Fatalf("weekly error=%v", err)
+	}
+}
+
+func TestBillingSnapshotAllowsOneSideFailureAndNormalizesGrokBuild(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.RawQuery, "format=credits") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"creditUsagePercent": 42, "billingPeriodEnd": "2026-07-20", "productUsage": []map[string]any{{"product": "Api", "usagePercent": 7}, {"product": "GrokBuild", "usagePercent": 35}}})
+			return
+		}
+		http.Error(w, "monthly unavailable", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	snap, err := c.GetBillingSnapshot(context.Background(), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Monthly != nil || snap.MonthlyError == "" || snap.Weekly == nil {
+		t.Fatalf("snap=%+v", snap)
+	}
+	if !snap.GrokBuild.Reported || snap.GrokBuild.SharedWeeklyUsagePercent == nil || *snap.GrokBuild.SharedWeeklyUsagePercent != 42 || snap.GrokBuild.GrokBuildContribution == nil || *snap.GrokBuild.GrokBuildContribution != 35 {
+		t.Fatalf("view=%+v", snap.GrokBuild)
+	}
+}
+
+func TestParseWeeklyCredits_SnakeCaseProductUsage(t *testing.T) {
+	raw := []byte(`{"config":{"credit_usage_percent":{"val":0},"current_period":{"start":"2026-07-01"},"product_usage":[{"name":"Api","usage_percent":{"val":4}},{"name":"GrokBuild","usage_percent":{"val":12.5}}]}}`)
+	w, err := ParseWeeklyCredits(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.CreditUsagePercent == nil || *w.CreditUsagePercent != 0 {
+		t.Fatalf("shared usage=%v", w.CreditUsagePercent)
+	}
+	if len(w.CurrentPeriod) == 0 || len(w.ProductUsage) != 2 {
+		t.Fatalf("weekly=%+v", w)
+	}
+	product := w.ProductUsage[0]
+	if product.Product != "GrokBuild" || product.UsagePercent == nil || *product.UsagePercent != 12.5 {
+		t.Fatalf("product=%+v", product)
+	}
+	if w.ProductUsage[1].Product != "Api" {
+		t.Fatalf("GrokBuild product was not sorted first: %+v", w.ProductUsage)
 	}
 }
 

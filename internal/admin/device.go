@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -32,11 +33,12 @@ type deviceSession struct {
 
 // StartDeviceLogin begins an RFC 8628 login without exposing device_code.
 func (h *Handlers) StartDeviceLogin(w http.ResponseWriter, r *http.Request) {
-	if h.OAuth == nil {
+	oauthClient, err := h.deviceOAuth()
+	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "device OAuth is not configured")
 		return
 	}
-	code, err := h.OAuth.RequestDeviceCode(r.Context())
+	code, err := oauthClient.RequestDeviceCode(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -84,7 +86,8 @@ func (h *Handlers) StartDeviceLogin(w http.ResponseWriter, r *http.Request) {
 
 // PollDeviceLogin performs one device-token exchange attempt.
 func (h *Handlers) PollDeviceLogin(w http.ResponseWriter, r *http.Request) {
-	if h.OAuth == nil {
+	oauthClient, err := h.deviceOAuth()
+	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "device OAuth is not configured")
 		return
 	}
@@ -123,7 +126,7 @@ func (h *Handlers) PollDeviceLogin(w http.ResponseWriter, r *http.Request) {
 	h.deviceSessions[sessionID] = session
 	h.deviceMu.Unlock()
 
-	tokens, err := h.OAuth.ExchangeDeviceCode(r.Context(), session.DeviceCode)
+	tokens, err := oauthClient.ExchangeDeviceCode(r.Context(), session.DeviceCode)
 	if err != nil {
 		message := strings.ToLower(err.Error())
 		switch {
@@ -165,13 +168,29 @@ func (h *Handlers) PollDeviceLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Device authorization may upsert an existing account. Retire any access or
+	// refresh token cached for that credential so subsequent traffic observes the
+	// newly authorized session rather than an older in-process snapshot.
+	if h.TokenCache != nil {
+		h.TokenCache.Invalidate(credential.ID)
+	}
 	h.deviceMu.Lock()
 	delete(h.deviceSessions, sessionID)
 	h.deviceMu.Unlock()
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"status":     "authorized",
-		"credential": maskCredential(credential),
+		"credential": h.maskedCredential(credential),
 	})
+}
+
+func (h *Handlers) deviceOAuth() (DeviceOAuth, error) {
+	if h != nil && h.OAuthFor != nil {
+		return h.OAuthFor()
+	}
+	if h != nil && h.OAuth != nil {
+		return h.OAuth, nil
+	}
+	return nil, fmt.Errorf("device OAuth is not configured")
 }
 
 func deviceCredentialInput(tokens *auth.TokenSet, clientID string) storage.CreateCredentialInput {

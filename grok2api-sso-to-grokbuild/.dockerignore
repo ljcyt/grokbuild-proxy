@@ -1,0 +1,10 @@
+# Deny by default: this directory is also used by the standalone CLI and may
+# contain raw SSO lists (for example new_tokens.txt). Never send those files to
+# a local or remote Docker/BuildKit daemon.
+*
+!.dockerignore
+!Dockerfile
+!README
+!requirements.txt
+!server.py
+!sso2auth.py

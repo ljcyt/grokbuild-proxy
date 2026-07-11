@@ -1,0 +1,42 @@
+services:
+  grokbuild-proxy:
+    image: "ghcr.io/greygung/grokbuild-proxy:${GROKBUILD_CONTAINER_TAG:?set GROKBUILD_CONTAINER_TAG to an exact release version}"
+    container_name: grokbuild-proxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - grokbuild-data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      LISTEN: "0.0.0.0:8080"
+      ALLOW_PUBLIC_LISTEN: "true"
+    networks:
+      - app
+      - sso-internal
+
+  sso-import:
+    profiles: ["sso-import"]
+    image: "ghcr.io/greygung/grokbuild-proxy-sso-import:${GROKBUILD_CONTAINER_TAG:?set GROKBUILD_CONTAINER_TAG to an exact release version}"
+    restart: unless-stopped
+    environment:
+      SSO_CONVERTER_API_TOKEN: "${SSO_CONVERTER_API_TOKEN:-}"
+      SSO_CONVERTER_HOST: "0.0.0.0"
+      SSO_CONVERTER_PORT: "8090"
+      SSO_CONVERTER_MAX_ITEMS: "${SSO_CONVERTER_MAX_ITEMS:-50}"
+      SSO_CONVERTER_MAX_INFLIGHT_REQUESTS: "${SSO_CONVERTER_MAX_INFLIGHT_REQUESTS:-4}"
+      SSO_CONVERTER_PROXY: "${SSO_CONVERTER_PROXY:-}"
+    expose:
+      - "8090"
+    networks:
+      - sso-internal
+      - sso-egress
+
+volumes:
+  grokbuild-data:
+
+networks:
+  app:
+  sso-internal:
+    internal: true
+  sso-egress:

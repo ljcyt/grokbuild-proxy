@@ -1,0 +1,166 @@
+# Grok SSO 转换器
+
+本目录同时提供原有命令行转换器和一个无状态 HTTP sidecar。两种入口都只使用
+`sso2auth.py` 中现有的固定 x.ai Device Flow（`accounts.x.ai` / `auth.x.ai`）；服务端
+不接受自定义 issuer、client ID 或上游 URL。
+
+## 命令行模式
+
+安装依赖并运行：
+
+```bash
+python3 -m pip install -r requirements.txt
+export https_proxy=http://127.0.0.1:7890
+export http_proxy=http://127.0.0.1:7890
+export all_proxy=http://127.0.0.1:7890
+python3 sso2auth.py --sso grok_sso_tokens.txt --out merged.json --merge --workers 5
+```
+
+命令行行为保持不变：默认每条 SSO 最多尝试 3 次，失败值写入 `failed.txt`。常用参数：
+
+- `--workers 5`：总并发。
+- `--flow-concurrency 2`：同时执行 verify + approve 的数量。
+- `--flow-gap 0.5`：关键路径之间的最小间隔。
+- `--failed failed.txt`：失败输出文件。
+- `--retries 3`：单条最大尝试次数。
+
+`convert_sso_batch()` 是供服务调用的纯内存入口。它不读取或写入 auth/failed 文件，
+返回结果中也不会包含输入 SSO。
+
+## Sidecar 部署
+
+直接运行：
+
+```bash
+export SSO_CONVERTER_API_TOKEN='replace-with-a-long-random-secret'
+python3 server.py
+```
+
+容器运行：
+
+```bash
+docker build -t grok-sso-converter ./grok2api-sso-to-grokbuild
+docker run --rm -p 127.0.0.1:8090:8090 \
+  -e SSO_CONVERTER_API_TOKEN='replace-with-a-long-random-secret' \
+  -e SSO_CONVERTER_HOST=0.0.0.0 \
+  grok-sso-converter
+```
+
+容器默认以非 root 用户运行。`GET /healthz` 不需要认证；转换接口必须使用 Bearer token。
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `SSO_CONVERTER_API_TOKEN` | 无 | 必填的 Bearer token；为空时服务拒绝启动 |
+| `SSO_CONVERTER_HOST` | `127.0.0.1` | 监听地址；容器映射端口时设置为 `0.0.0.0` |
+| `SSO_CONVERTER_PORT` | `8090` | 监听端口 |
+| `SSO_CONVERTER_MAX_BODY_BYTES` | `262144` | 最大 JSON 请求体，硬上限 1 MiB |
+| `SSO_CONVERTER_MAX_ITEMS` | `32` | 每批最大条数，硬上限 100 |
+| `SSO_CONVERTER_MAX_CONCURRENCY` | `4` | 全服务共享转换线程数，硬上限 16 |
+| `SSO_CONVERTER_MAX_INFLIGHT_REQUESTS` | 与转换并发相同 | handler 连接及转换请求的并发上限；超额连接在创建线程前关闭，超额转换请求返回 429 |
+| `SSO_CONVERTER_REQUEST_READ_TIMEOUT_SECONDS` | `15` | 从 accept 起覆盖请求头和请求体读取的绝对截止时间（慢速逐字节也不能续期） |
+| `SSO_CONVERTER_ITEM_TIMEOUT_SECONDS` | `120` | 每条总超时上限，硬上限 300 秒 |
+| `SSO_CONVERTER_NETWORK_TIMEOUT_SECONDS` | `30` | 单次网络操作超时 |
+| `SSO_CONVERTER_POLL_TIMEOUT_SECONDS` | `90` | Device Flow token 轮询超时 |
+| `SSO_CONVERTER_MAX_RETRIES` | `3` | 单条最大尝试次数 |
+| `SSO_CONVERTER_FLOW_CONCURRENCY` | `2` | verify + approve 关键路径并发 |
+| `SSO_CONVERTER_FLOW_GAP_SECONDS` | `0.5` | 关键路径最小间隔 |
+| `SSO_CONVERTER_MAX_SSO_LENGTH` | `16384` | 单条 SSO 最大字符数 |
+| `SSO_CONVERTER_MAX_EMAIL_LENGTH` | `320` | email 最大字符数 |
+| `SSO_CONVERTER_MAX_SOURCE_LENGTH` | `256` | source 最大字符数 |
+| `SSO_CONVERTER_PROXY` | 空 | sidecar 专用代理 URL；优先于通用代理变量 |
+
+未设置 `SSO_CONVERTER_PROXY` 时，代理按 `https_proxy`、`HTTPS_PROXY`、`http_proxy`、
+`HTTP_PROXY`、`all_proxy`、`ALL_PROXY` 的顺序解析。日志只显示脱敏后的代理主机，绝不
+打印代理密码、SSO cookie、access token 或 refresh token。
+
+## API
+
+### `GET /healthz`
+
+成功返回 `200`：
+
+```json
+{"status":"ok"}
+```
+
+### `POST /v1/convert`
+
+请求必须为 `application/json`，并提供 `Authorization: Bearer <token>`。`timeout_seconds`
+可省略；传入值必须大于 0 且不超过服务配置的单条超时。
+
+```json
+{
+  "timeout_seconds": 60,
+  "items": [
+    {"sso": "<x.ai-sso-cookie>", "email": "user@example.com", "source": "account-001"},
+    {"sso": "<x.ai-sso-cookie>"}
+  ]
+}
+```
+
+`sso` 必填；`email` 和 `source` 可选。三者必须是字符串，不接受其他 item 字段。
+响应始终按输入顺序排列。合法批次即使部分失败也返回 `200`，逐项查看 `ok`：
+
+```json
+{
+  "results": [
+    {
+      "index": 0,
+      "source": "account-001",
+      "ok": true,
+      "credential": {
+        "source_key": "account-001",
+        "key": "<access-token>",
+        "auth_mode": "oidc",
+        "create_time": "2026-07-11T00:00:00.000000000Z",
+        "user_id": "user-id",
+        "email": "user@example.com",
+        "principal_type": "User",
+        "principal_id": "user-id",
+        "refresh_token": "<refresh-token>",
+        "expires_at": "2026-07-11T06:00:00.000000000Z",
+        "oidc_issuer": "https://auth.x.ai",
+        "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828"
+      }
+    },
+    {
+      "index": 1,
+      "source": "",
+      "ok": false,
+      "error": {"code": "conversion_failed", "message": "SSO conversion failed"}
+    }
+  ],
+  "summary": {"total": 2, "succeeded": 1, "failed": 1}
+}
+```
+
+失败信息经过固定化处理，不回显 SSO，也不暴露上游响应、cookie 或 token。服务模式从不
+创建 `failed.txt`，不会把凭据写入本地文件。
+
+## 代理与安全
+
+- 默认只监听回环地址。跨主机部署时，应放在提供 TLS 的可信反向代理或私有网络之后。
+- 使用足够长的随机 Bearer token，并通过 secret 管理器注入；不要写入镜像或仓库。
+- `/healthz` 仅表示进程存活，不探测账号、代理或 x.ai，也不泄露运行配置。
+- 对外层反向代理同时设置请求体大小、连接数和请求超时限制。
+- sidecar 的连接和转换并发限制在整个进程共享；慢请求头受读取超时约束，无法无界创建
+  handler 线程。超时任务不会写盘或出现在响应中。
+- x.ai 的 stdlib 与 curl 响应均以分块方式读取，每块检查绝对 deadline/取消状态，且有
+  1 MiB 硬上限；慢响应或超限响应会释放转换 worker。
+- Device Flow 返回的验证地址必须是 HTTPS 的 `x.ai` 域名和预期路径；每次重定向都在
+  发起下一跳请求前重新校验，拒绝外部域名、非标准端口和用户信息 URL。
+- 每条任务使用绝对 deadline，并将协作取消传播到信号量等待、网络调用、重试退避和
+  token 轮询。底层网络调用仍只能在其 socket 超时点返回，因此应让网络超时小于条目
+  总超时，并按最坏情况规划并发。
+- 不要把请求体、`Authorization`、上游 cookie jar 或返回凭据接入访问日志。
+
+## 测试
+
+测试通过注入 fake mint 函数运行，不访问网络：
+
+```bash
+cd grok2api-sso-to-grokbuild
+python3 -m unittest discover -s tests -v
+```

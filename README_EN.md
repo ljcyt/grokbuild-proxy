@@ -34,6 +34,10 @@ thinking blocks, encrypted reasoning replay, and Grok-hosted web search.
 - Summarized/omitted thinking and encrypted reasoning replay
 - Multi-account selection, sticky sessions, cooldown, and failover
 - Grok CLI import and browser OAuth device login
+- Multi-file Grok/CPA JSON and optional SSO batch import with per-item results
+- Global and per-credential HTTP(S)/SOCKS proxy routing
+- Conservative credential inspection, quarantine, and optional delayed cleanup
+- Grok Build shared-weekly-quota view with raw billing diagnostics
 - Atomic local JSON storage with locking and backup recovery
 - Embedded Admin Web UI
 - Health, readiness, Prometheus metrics, request IDs, and structured logs
@@ -57,7 +61,7 @@ irm https://raw.githubusercontent.com/GreyGunG/grokbuild-proxy/main/scripts/inst
 
 The installers detect the OS/architecture, download the latest Release, verify
 SHA-256, install the binary, and create a local configuration. Set
-`GROKBUILD_VERSION=v0.1.0` to pin a release.
+`GROKBUILD_VERSION=v0.2.0` to pin a release.
 
 ## Run from source
 
@@ -127,6 +131,47 @@ Published image:
 ```text
 ghcr.io/greygung/grokbuild-proxy
 ```
+
+### Optional SSO import sidecar
+
+The SSO converter is disabled by default. Generate one Bearer token, use the
+same value for `SSO_CONVERTER_API_TOKEN` and `sso_converter.api_key`, set the
+endpoint to `http://sso-import:8090`, then start the profile:
+
+```bash
+export SSO_CONVERTER_API_TOKEN="$(openssl rand -hex 32)"
+docker compose --profile sso-import up --build -d
+```
+
+That command is for a source checkout. Binary release archives also contain an
+image-only Compose file, so GHCR users can run the same profile without Go,
+Python, or a local image build:
+
+```bash
+cp config.example.yaml config.yaml
+export SSO_CONVERTER_API_TOKEN="$(openssl rand -hex 32)"
+export GROKBUILD_CONTAINER_TAG=0.1.1
+docker compose -f docker-compose.release.yml --profile sso-import pull
+docker compose -f docker-compose.release.yml --profile sso-import up -d
+```
+
+Release Compose requires one explicit exact `GROKBUILD_CONTAINER_TAG` for both
+images, preventing proxy/sidecar version skew from independently moving tags.
+The published images are `ghcr.io/greygung/grokbuild-proxy` and
+`ghcr.io/greygung/grokbuild-proxy-sso-import`.
+
+Plain HTTP is accepted only for loopback/private addresses or a single-label
+Compose service name. The sidecar publishes no host port and validates every
+x.ai redirect before following it. SSO values remain in memory and are never
+returned to the browser or written by service mode.
+
+Connections from the proxy to a loopback/private/single-label converter are
+forced direct, so global HTTP proxies never receive raw SSO values or the
+sidecar Bearer key. The sidecar's x.ai egress proxy is configured separately.
+
+`max_batch` is capped at 100 and `timeout_sec` at 300 seconds. The proxy never
+follows redirects returned by the sidecar, so neither SSO cookies nor its
+Bearer key can be replayed to another URL.
 
 ## Documentation
 

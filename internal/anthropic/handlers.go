@@ -75,6 +75,10 @@ func (h *Handlers) HandleMessages(w http.ResponseWriter, r *http.Request) {
 
 	resolved := h.resolve(probe.Model)
 	convID := sessionIDFromRequest(r)
+	if len(convID) > 512 {
+		WriteError(w, http.StatusBadRequest, "session id must be at most 512 bytes")
+		return
+	}
 	thinkingBridge := thinkingBridgeFromRaw(probe.Thinking)
 
 	body, originalModel, stream, err := TranslateRequest(raw, TranslateReqOptions{

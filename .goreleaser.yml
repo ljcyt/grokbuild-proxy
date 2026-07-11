@@ -53,9 +53,18 @@ archives:
       - CHANGELOG.md
       - docs/*.md
       - config.example.yaml
+      - Dockerfile
+      - docker-compose.yml
+      - docker-compose.release.yml
       - Makefile
       - scripts/install.sh
       - scripts/install.ps1
+      - grok2api-sso-to-grokbuild/.dockerignore
+      - grok2api-sso-to-grokbuild/Dockerfile
+      - grok2api-sso-to-grokbuild/README
+      - grok2api-sso-to-grokbuild/requirements.txt
+      - grok2api-sso-to-grokbuild/server.py
+      - grok2api-sso-to-grokbuild/sso2auth.py
 
 checksum:
   name_template: checksums.txt

@@ -43,7 +43,7 @@ irm https://raw.githubusercontent.com/GreyGunG/grokbuild-proxy/main/scripts/inst
 Install a specific version:
 
 ```bash
-GROKBUILD_VERSION=v0.1.0 sh -c \
+GROKBUILD_VERSION=v0.2.0 sh -c \
   'curl -fsSL https://raw.githubusercontent.com/GreyGunG/grokbuild-proxy/main/scripts/install.sh | sh'
 ```
 
@@ -85,9 +85,9 @@ Environment listen overrides are applied before configuration validation.
 Using Make:
 
 ```bash
-make build VERSION=v0.1.0
+make build VERSION=v0.2.0
 make check
-make docker-build VERSION=v0.1.0
+make docker-build VERSION=v0.2.0
 make release-snapshot
 ```
 
@@ -102,7 +102,7 @@ go build -trimpath -o bin/grokbuild-proxy ./cmd/grokbuild-proxy
 Embed a version:
 
 ```bash
-VERSION=v0.1.0
+VERSION=v0.2.0
 go build -trimpath \
   -ldflags="-s -w -X main.version=${VERSION}" \
   -o bin/grokbuild-proxy \
@@ -306,6 +306,31 @@ Artifacts are written to `dist/` and include:
 - `checksums.txt`
 - archive SBOMs
 - project documentation and example configuration
+- source-build and image-only Compose files
+- the SSO import sidecar Dockerfile, runtime sources, and dependency manifest
+
+Verify the deployable payload after a snapshot build:
+
+```bash
+REQUIRE_SBOM=1 sh scripts/verify-release-archive.sh dist
+```
+
+The verifier requires the exact archive payload, regular-file entries, Unix
+execute bits on Linux/macOS binaries, canonical checksum syntax, and one
+checksummed SBOM for each of the six archives.
+
+Downloaded binary archives can start the published proxy and optional sidecar
+images without a source tree:
+
+```bash
+cp config.example.yaml config.yaml
+export SSO_CONVERTER_API_TOKEN="$(openssl rand -hex 32)"
+export GROKBUILD_CONTAINER_TAG=0.1.1
+docker compose -f docker-compose.release.yml --profile sso-import pull
+docker compose -f docker-compose.release.yml --profile sso-import up -d
+```
+
+Set the required `GROKBUILD_CONTAINER_TAG` to the exact downloaded release before `pull` and `up`; both containers always use that same immutable version.
 
 ## Release process
 
@@ -316,12 +341,14 @@ Releases are automated by `.github/workflows/release.yml`.
 3. Create and push a semantic-version tag:
 
    ```bash
-   git tag -a v0.1.0 -m "v0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.2.0 -m "v0.2.0"
+   git push origin v0.2.0
    ```
 
-4. GitHub Actions publishes archives, checksums, SBOMs, a checksum Sigstore
-   bundle, and multi-platform GHCR images.
+4. GitHub Actions builds both images under a revision-scoped staging tag,
+   verifies both multi-platform manifests, and then promotes immutable exact
+   version tags. Archives, SBOMs, and checksums are built and verified locally
+   before the checksum is signed and the GitHub Release is published.
 5. Verify the GitHub Release and install one downloaded artifact on a clean
    machine.
 

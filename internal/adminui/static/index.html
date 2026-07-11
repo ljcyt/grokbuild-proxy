@@ -39,6 +39,7 @@
         <nav class="nav" id="main-nav" aria-label="主导航">
           <a href="#/credentials" data-route="credentials">账号凭证</a>
           <a href="#/clients" data-route="clients">客户端密钥</a>
+          <a href="#/settings" data-route="settings">运行设置</a>
           <a href="#/system" data-route="system">系统信息</a>
           <a href="#/integration" data-route="integration">接入示例</a>
         </nav>
@@ -58,12 +59,12 @@
               <button type="button" class="btn" id="btn-cred-refresh-list">刷新列表</button>
               <button type="button" class="btn btn-primary" id="btn-device-login">浏览器登录</button>
               <button type="button" class="btn btn-primary" id="btn-import-default">导入本机 ~/.grok</button>
-              <button type="button" class="btn" id="btn-import-raw">粘贴 JSON 导入</button>
+              <button type="button" class="btn" id="btn-import-raw">批量导入</button>
             </div>
           </div>
           <div id="cred-empty" class="empty card hidden">
             <h3>暂无凭证</h3>
-            <p class="muted">可从本机默认路径导入，或粘贴 Grok 授权 JSON 文件内容。</p>
+            <p class="muted">可从本机默认路径导入，或批量上传 Grok / CPA JSON 与 SSO 文件。</p>
           </div>
           <div id="cred-list" class="card-grid"></div>
         </section>
@@ -95,6 +96,17 @@
             <button type="button" class="btn" id="btn-system-refresh">刷新</button>
           </div>
           <div id="system-body" class="card stack"></div>
+        </section>
+
+        <section id="page-settings" class="page hidden">
+          <div class="page-head">
+            <div>
+              <h2>运行设置</h2>
+              <p class="muted">全局出站代理、SSO 转换服务与凭证自动巡检</p>
+            </div>
+            <button type="button" class="btn" id="btn-settings-refresh">刷新</button>
+          </div>
+          <div id="settings-body" class="card stack"></div>
         </section>
 
         <section id="page-integration" class="page hidden">

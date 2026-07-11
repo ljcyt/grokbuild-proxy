@@ -80,6 +80,9 @@ type OAuthClient struct {
 	DeviceAuthEndpoint string
 	// DiscoveryURL overrides the default OIDC discovery URL (tests).
 	DiscoveryURL string
+	// AllowUnsafeEndpoints permits non-xAI test servers. Production wiring must
+	// leave this false.
+	AllowUnsafeEndpoints bool
 }
 
 func (c *OAuthClient) http() *http.Client {
@@ -118,17 +121,25 @@ func (c *OAuthClient) issuer() string {
 }
 
 func (c *OAuthClient) defaultTokenEndpoint() string {
-	return strings.TrimRight(c.issuer(), "/") + "/oauth2/token"
+	return DefaultTokenEndpoint
 }
 
 func (c *OAuthClient) defaultDeviceAuthEndpoint() string {
-	return strings.TrimRight(c.issuer(), "/") + "/oauth2/device/code"
+	return DefaultDeviceAuthEndpoint
 }
 
 // Discover fetches OIDC endpoints from auth.x.ai.
 func (c *OAuthClient) Discover(ctx context.Context) (*Discovery, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if _, err := NormalizeTrustedIssuer(c.issuer()); err != nil {
+		return nil, err
+	}
+	if c != nil && !c.AllowUnsafeEndpoints {
+		if err := validateTrustedOAuthURL(c.discoveryURL(), "/.well-known/openid-configuration"); err != nil {
+			return nil, err
+		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.discoveryURL(), nil)
 	if err != nil {
@@ -145,7 +156,9 @@ func (c *OAuthClient) Discover(ctx context.Context) (*Discovery, error) {
 		return nil, fmt.Errorf("auth discovery: read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("auth discovery: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &HTTPStatusError{
+			Operation: "auth discovery", StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body)),
+		}
 	}
 	var d Discovery
 	if err := json.Unmarshal(body, &d); err != nil {
@@ -168,6 +181,19 @@ func (c *OAuthClient) Discover(ctx context.Context) (*Discovery, error) {
 		}
 	}
 	return &d, nil
+}
+
+// doTokenRequest never follows redirects. In particular, 307 and 308 retain
+// the POST method and body, so following one could disclose refresh/device
+// grant material to the redirect target. Clone the client to avoid mutating a
+// caller-owned shared http.Client.
+func (c *OAuthClient) doTokenRequest(req *http.Request) (*http.Response, error) {
+	base := c.http()
+	client := *base
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return client.Do(req)
 }
 
 // ResolveTokenEndpoint returns the configured, discovered, or default token endpoint.
@@ -194,6 +220,9 @@ func (c *OAuthClient) Refresh(ctx context.Context, refreshToken string) (*TokenS
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if _, err := NormalizeTrustedIssuer(c.issuer()); err != nil {
+		return nil, err
 	}
 
 	endpoint := ""
@@ -222,6 +251,9 @@ func (c *OAuthClient) ExchangeDeviceCode(ctx context.Context, deviceCode string)
 	deviceCode = strings.TrimSpace(deviceCode)
 	if deviceCode == "" {
 		return nil, fmt.Errorf("auth device: device_code is required")
+	}
+	if _, err := NormalizeTrustedIssuer(c.issuer()); err != nil {
+		return nil, err
 	}
 	endpoint := ""
 	if c != nil {
@@ -257,6 +289,9 @@ func (c *OAuthClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeRespons
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if _, err := NormalizeTrustedIssuer(c.issuer()); err != nil {
+		return nil, err
+	}
 	endpoint := ""
 	if c != nil {
 		endpoint = strings.TrimSpace(c.DeviceAuthEndpoint)
@@ -271,6 +306,11 @@ func (c *OAuthClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeRespons
 			endpoint = c.defaultDeviceAuthEndpoint()
 		}
 	}
+	if c == nil || !c.AllowUnsafeEndpoints {
+		if err := validateTrustedOAuthURL(endpoint, "/oauth2/device/code"); err != nil {
+			return nil, err
+		}
+	}
 
 	form := url.Values{
 		"client_id": {c.clientID()},
@@ -282,7 +322,7 @@ func (c *OAuthClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeRespons
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.http().Do(req)
+	resp, err := c.doTokenRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("auth device: request: %w", err)
 	}
@@ -292,7 +332,9 @@ func (c *OAuthClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeRespons
 		return nil, fmt.Errorf("auth device: read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("auth device: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &HTTPStatusError{
+			Operation: "auth device", StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body)),
+		}
 	}
 	var out DeviceCodeResponse
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -323,6 +365,11 @@ func (c *OAuthClient) postTokenForm(ctx context.Context, endpoint string, form u
 	if endpoint == "" {
 		return nil, fmt.Errorf("auth token: empty token endpoint")
 	}
+	if c == nil || !c.AllowUnsafeEndpoints {
+		if err := validateTrustedOAuthURL(endpoint, "/oauth2/token"); err != nil {
+			return nil, err
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("auth token: create request: %w", err)
@@ -330,7 +377,7 @@ func (c *OAuthClient) postTokenForm(ctx context.Context, endpoint string, form u
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.http().Do(req)
+	resp, err := c.doTokenRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("auth token: request: %w", err)
 	}
@@ -340,7 +387,9 @@ func (c *OAuthClient) postTokenForm(ctx context.Context, endpoint string, form u
 		return nil, fmt.Errorf("auth token: read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("auth token: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &HTTPStatusError{
+			Operation: "auth token", StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body)),
+		}
 	}
 
 	var payload struct {
@@ -389,11 +438,51 @@ func validateXAIEndpoint(raw, field string) error {
 	if u.Scheme != "https" {
 		return fmt.Errorf("auth discovery: %s must use https", field)
 	}
-	host := strings.ToLower(u.Hostname())
-	if host != "x.ai" && !strings.HasSuffix(host, ".x.ai") {
-		return fmt.Errorf("auth discovery: %s host %q is not on x.ai", field, host)
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	allowedHost := host == "auth.x.ai"
+	if strings.HasPrefix(field, "verification_uri") {
+		allowedHost = allowedHost || host == "accounts.x.ai"
+	}
+	if !allowedHost || (u.Port() != "" && u.Port() != "443") || u.User != nil {
+		return fmt.Errorf("auth discovery: %s must use trusted auth.x.ai endpoint", field)
 	}
 	return nil
+}
+
+func validateTrustedOAuthURL(raw, expectedPath string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("auth endpoint: invalid URL: %w", err)
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if u.Scheme != "https" || host != "auth.x.ai" ||
+		(u.Port() != "" && u.Port() != "443") || u.User != nil ||
+		u.EscapedPath() != expectedPath || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("auth endpoint: untrusted OAuth URL")
+	}
+	return nil
+}
+
+// NormalizeTrustedIssuer accepts only the production xAI issuer. Imported
+// credentials must never redirect refresh-token grants to an arbitrary OIDC
+// issuer.
+func NormalizeTrustedIssuer(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return Issuer, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("auth issuer: invalid URL: %w", err)
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	path := strings.TrimRight(u.EscapedPath(), "/")
+	if u.Scheme != "https" || host != "auth.x.ai" ||
+		(u.Port() != "" && u.Port() != "443") || u.User != nil ||
+		path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("auth issuer: only %s is trusted", Issuer)
+	}
+	return Issuer, nil
 }
 
 func firstNonEmpty(values ...string) string {

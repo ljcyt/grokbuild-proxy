@@ -46,6 +46,10 @@ Never run live smoke in pull requests or with production credentials.
 
 - [ ] update `CHANGELOG.md`
 - [ ] create a signed `vMAJOR.MINOR.PATCH` tag
-- [ ] verify archives, checksums, SBOMs, Sigstore bundle, and GHCR manifests
-- [ ] test one downloaded archive on a clean host
+- [ ] confirm the release `validate` job passed Go race/vet/build, sidecar tests, both image builds, Compose validation, and the six-platform snapshot
+- [ ] run `REQUIRE_SBOM=1 sh scripts/verify-release-archive.sh dist` against a snapshot with Syft available; confirm the exact payload, canonical checksums, and all six checksummed SBOMs pass
+- [ ] verify both SHA-staged GHCR manifests were checked before the immutable exact tags were promoted
+- [ ] verify archives, checksums, SBOMs, Sigstore bundle, and both exact GHCR manifests
+- [ ] test one downloaded archive and `docker-compose.release.yml` SSO profile on a clean host with an exact `GROKBUILD_CONTAINER_TAG`
+- [ ] confirm moving tags were promoted only after both exact images and the GitHub release succeeded
 - [ ] publish upgrade and rollback notes

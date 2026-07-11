@@ -26,6 +26,18 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/credentials/import-grok", h.ImportGrok)
 	mux.HandleFunc("POST /admin/oauth/device/start", h.StartDeviceLogin)
 	mux.HandleFunc("POST /admin/oauth/device/poll", h.PollDeviceLogin)
+	mux.HandleFunc("GET /admin/settings", h.RuntimeSettings)
+	mux.HandleFunc("PUT /admin/settings", h.UpdateRuntimeSettings)
+	mux.HandleFunc("POST /admin/import-jobs", h.StartImportJob)
+	mux.HandleFunc("GET /admin/import-jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		h.ImportJob(w, r, r.PathValue("id"))
+	})
+	mux.HandleFunc("POST /admin/credential-imports", h.StartImportJob)
+	mux.HandleFunc("GET /admin/credential-imports/{id}", func(w http.ResponseWriter, r *http.Request) {
+		h.ImportJob(w, r, r.PathValue("id"))
+	})
+	mux.HandleFunc("GET /admin/inspection", h.InspectionStatus)
+	mux.HandleFunc("POST /admin/inspection/run", h.RunInspection)
 
 	// Credential by id
 	mux.HandleFunc("POST /admin/credentials/{id}/disable", func(w http.ResponseWriter, r *http.Request) {
@@ -33,6 +45,9 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("PUT /admin/credentials/{id}/priority", func(w http.ResponseWriter, r *http.Request) {
 		h.SetPriority(w, r, r.PathValue("id"))
+	})
+	mux.HandleFunc("PUT /admin/credentials/{id}/proxy", func(w http.ResponseWriter, r *http.Request) {
+		h.SetCredentialProxy(w, r, r.PathValue("id"))
 	})
 	mux.HandleFunc("POST /admin/credentials/{id}/refresh", func(w http.ResponseWriter, r *http.Request) {
 		h.RefreshCredential(w, r, r.PathValue("id"))
@@ -77,6 +92,18 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 		h.StartDeviceLogin(w, r)
 	case path == "/admin/oauth/device/poll" && r.Method == http.MethodPost:
 		h.PollDeviceLogin(w, r)
+	case path == "/admin/settings" && r.Method == http.MethodGet:
+		h.RuntimeSettings(w, r)
+	case path == "/admin/settings" && r.Method == http.MethodPut:
+		h.UpdateRuntimeSettings(w, r)
+	case path == "/admin/import-jobs" && r.Method == http.MethodPost:
+		h.StartImportJob(w, r)
+	case path == "/admin/credential-imports" && r.Method == http.MethodPost:
+		h.StartImportJob(w, r)
+	case path == "/admin/inspection" && r.Method == http.MethodGet:
+		h.InspectionStatus(w, r)
+	case path == "/admin/inspection/run" && r.Method == http.MethodPost:
+		h.RunInspection(w, r)
 	case path == "/admin/clients" && r.Method == http.MethodGet:
 		h.ListClients(w, r)
 	case path == "/admin/clients" && r.Method == http.MethodPost:
@@ -93,6 +120,9 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 			case rest == "priority" && r.Method == http.MethodPut:
 				h.SetPriority(w, r, id)
 				return
+			case rest == "proxy" && r.Method == http.MethodPut:
+				h.SetCredentialProxy(w, r, id)
+				return
 			case rest == "refresh" && r.Method == http.MethodPost:
 				h.RefreshCredential(w, r, id)
 				return
@@ -107,6 +137,18 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 		if id, rest, ok := cutAfterPrefix(path, "/admin/clients/"); ok {
 			if rest == "" && r.Method == http.MethodDelete {
 				h.DeleteClient(w, r, id)
+				return
+			}
+		}
+		if id, rest, ok := cutAfterPrefix(path, "/admin/import-jobs/"); ok {
+			if rest == "" && r.Method == http.MethodGet {
+				h.ImportJob(w, r, id)
+				return
+			}
+		}
+		if id, rest, ok := cutAfterPrefix(path, "/admin/credential-imports/"); ok {
+			if rest == "" && r.Method == http.MethodGet {
+				h.ImportJob(w, r, id)
 				return
 			}
 		}

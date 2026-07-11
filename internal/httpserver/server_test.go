@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,20 @@ func (s stubClientStore) LookupClientByPlaintext(plaintext string) (storage.Clie
 	}
 	c, ok := s.keys[plaintext]
 	return c, ok, nil
+}
+
+type countingReadinessStore struct {
+	stubClientStore
+	mu    sync.Mutex
+	calls int
+	creds []storage.Credential
+}
+
+func (s *countingReadinessStore) ListCredentials() ([]storage.Credential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	return append([]storage.Credential(nil), s.creds...), nil
 }
 
 func TestMiddlewareRejectsMissingKey(t *testing.T) {
@@ -126,6 +141,26 @@ func TestHealthzNoAuth(t *testing.T) {
 	}
 }
 
+func TestReadinessUsesShortLivedSnapshotInsteadOfReadingStorePerRequest(t *testing.T) {
+	store := &countingReadinessStore{creds: []storage.Credential{{
+		ID: "ready", Enabled: true, AccessToken: "access",
+	}}}
+	h := New(Options{Config: config.Default(), Store: store, ReadinessCacheTTL: time.Minute})
+	for range 50 {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	}
+	store.mu.Lock()
+	calls := store.calls
+	store.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("ListCredentials calls=%d want 1", calls)
+	}
+}
+
 func TestReadinessMetricsAndRequestID(t *testing.T) {
 	store, err := storage.New(t.TempDir())
 	if err != nil {
@@ -135,10 +170,11 @@ func TestReadinessMetricsAndRequestID(t *testing.T) {
 	var logs bytes.Buffer
 	metrics := &Metrics{}
 	h := New(Options{
-		Config:  config.Default(),
-		Store:   store,
-		Metrics: metrics,
-		Logger:  slog.New(slog.NewJSONHandler(&logs, nil)),
+		Config:            config.Default(),
+		Store:             store,
+		Metrics:           metrics,
+		Logger:            slog.New(slog.NewJSONHandler(&logs, nil)),
+		ReadinessCacheTTL: time.Nanosecond,
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
@@ -248,6 +284,7 @@ func TestAdminUIServesLoginWithoutAuth(t *testing.T) {
 
 	for _, path := range []string{"/admin", "/admin/"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = "localhost:8080"
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {
@@ -272,6 +309,7 @@ func TestAdminAPIStillRequiresAuth(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/system", nil)
+	req.Host = "127.0.0.1:8080"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
@@ -286,6 +324,7 @@ func TestAdminUIAssetsServedWithoutAuth(t *testing.T) {
 	h := New(Options{Config: config.Default()})
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/ui/app.js", nil)
+	req.Host = "[::1]:8080"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -308,6 +347,7 @@ func TestCredentialsNotServedAsHTML(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/credentials", nil)
+	req.Host = "localhost"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
@@ -316,5 +356,44 @@ func TestCredentialsNotServedAsHTML(t *testing.T) {
 	body := rr.Body.String()
 	if strings.Contains(body, "<!DOCTYPE html>") || strings.Contains(body, "<html") {
 		t.Fatal("GET /admin/credentials must not return SPA HTML")
+	}
+}
+
+func TestAdminRejectsUntrustedHostWithoutTrustingForwardedHost(t *testing.T) {
+	cfg := config.Default()
+	cfg.AdminTrustedHosts = []string{"admin.example.test"}
+	h := New(Options{Config: cfg, AdminKey: "sk-admin-good", Admin: &admin.Handlers{}})
+
+	for _, path := range []string{"/admin", "/admin/ui/app.js", "/admin/system"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = "attacker.example.test:8080"
+		req.Header.Set("X-Forwarded-Host", "admin.example.test")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusMisdirectedRequest {
+			t.Fatalf("%s status=%d body=%s want 421", path, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestAdminAllowsExplicitTrustedHostAndLeavesPublicAPIUnchanged(t *testing.T) {
+	cfg := config.Default()
+	cfg.AdminTrustedHosts = []string{"Admin.Example.Test."}
+	h := New(Options{Config: cfg, AdminKey: "sk-admin-good", Admin: &admin.Handlers{}})
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	adminReq.Host = "admin.example.test:9443"
+	adminRR := httptest.NewRecorder()
+	h.ServeHTTP(adminRR, adminReq)
+	if adminRR.Code != http.StatusOK {
+		t.Fatalf("trusted admin status=%d body=%s", adminRR.Code, adminRR.Body.String())
+	}
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthReq.Host = "attacker.example.test"
+	healthRR := httptest.NewRecorder()
+	h.ServeHTTP(healthRR, healthReq)
+	if healthRR.Code != http.StatusOK {
+		t.Fatalf("health status=%d body=%s", healthRR.Code, healthRR.Body.String())
 	}
 }

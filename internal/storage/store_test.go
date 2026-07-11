@@ -2,6 +2,9 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +125,26 @@ func TestCredentialCRUD(t *testing.T) {
 	// Reject empty tokens.
 	if _, err := s.CreateCredential(CreateCredentialInput{Name: "x"}); err == nil {
 		t.Fatal("expected error for empty tokens")
+	}
+}
+
+func TestCreateCredentialRejectsDuplicateRotatingTokenIdentity(t *testing.T) {
+	s := newTestStore(t)
+	input := CreateCredentialInput{
+		Name: "one", UserID: "user-1", OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client-1",
+		AccessToken: "access-1", RefreshToken: "shared-refresh",
+	}
+	if _, err := s.CreateCredential(input); err != nil {
+		t.Fatal(err)
+	}
+	input.Name = "duplicate"
+	input.AccessToken = "access-2"
+	if _, err := s.CreateCredential(input); !errors.Is(err, ErrCredentialExists) {
+		t.Fatalf("err=%v want ErrCredentialExists", err)
+	}
+	credentials, err := s.ListCredentials()
+	if err != nil || len(credentials) != 1 {
+		t.Fatalf("credentials=%d err=%v", len(credentials), err)
 	}
 }
 
@@ -351,6 +374,35 @@ func TestEnsureBootstrapKeysPartialGenerate(t *testing.T) {
 	}
 }
 
+func TestBootstrapAPIKeyRotationIsTwoPhaseUntilOldClientDeleted(t *testing.T) {
+	s := newTestStore(t)
+	keyA := "sk-bootstrap-a-000000000000000000000000"
+	keyB := "sk-bootstrap-b-000000000000000000000000"
+	admin := "sk-bootstrap-admin-00000000000000000000"
+	if _, _, _, _, err := s.EnsureBootstrapKeys(keyA, admin); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := s.EnsureBootstrapKeys(keyB, admin); err != nil {
+		t.Fatal(err)
+	}
+	clientA, okA, err := s.LookupClientByPlaintext(keyA)
+	if err != nil || !okA {
+		t.Fatalf("old bootstrap key should remain valid during overlap: ok=%v err=%v", okA, err)
+	}
+	if _, okB, err := s.LookupClientByPlaintext(keyB); err != nil || !okB {
+		t.Fatalf("new bootstrap key should be valid: ok=%v err=%v", okB, err)
+	}
+	if err := s.DeleteClient(clientA.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.LookupClientByPlaintext(keyA); err != nil || ok {
+		t.Fatalf("deleted old key still authenticates: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := s.LookupClientByPlaintext(keyB); err != nil || !ok {
+		t.Fatalf("new key stopped authenticating: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestDeletedBootstrapClientDoesNotReappear(t *testing.T) {
 	s := newTestStore(t)
 	api, _, _, _, err := s.EnsureBootstrapKeys("", "")
@@ -567,6 +619,170 @@ func TestCorruptCredentialFileRecoversFromBackup(t *testing.T) {
 	}
 }
 
+func TestCredentialCacheReturnsDeepCopies(t *testing.T) {
+	s := newTestStore(t)
+	created, err := s.CreateCredential(CreateCredentialInput{
+		Name: "cached", AccessToken: "access", RefreshToken: "refresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().UTC().Truncate(time.Second)
+	if _, err := s.PatchCredential(created.ID, func(credential *Credential) error {
+		credential.PurgeAfter = &when
+		credential.Billing = map[string]any{
+			"nested": map[string]any{"remaining": float64(7)},
+			"items":  []any{map[string]any{"name": "grok"}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := s.GetCredential(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*first.PurgeAfter = first.PurgeAfter.Add(24 * time.Hour)
+	first.Billing["nested"].(map[string]any)["remaining"] = float64(0)
+	first.Billing["items"].([]any)[0].(map[string]any)["name"] = "mutated"
+
+	second, err := s.GetCredential(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.PurgeAfter.Equal(when) {
+		t.Fatalf("cached time pointer was mutated: %v", second.PurgeAfter)
+	}
+	if got := second.Billing["nested"].(map[string]any)["remaining"]; got != float64(7) {
+		t.Fatalf("cached nested map was mutated: %v", got)
+	}
+	if got := second.Billing["items"].([]any)[0].(map[string]any)["name"]; got != "grok" {
+		t.Fatalf("cached nested slice was mutated: %v", got)
+	}
+}
+
+func TestCredentialCacheInvalidatesAfterExternalFileChange(t *testing.T) {
+	s := newTestStore(t)
+	created, err := s.CreateCredential(CreateCredentialInput{
+		Name: "before", AccessToken: "access", RefreshToken: "refresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetCredential(created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(s.DataDir(), credentialsFile)
+	var doc credentialsDoc
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc.Credentials[0].Name = "after-external-replacement"
+	data, err = json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.GetCredential(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "after-external-replacement" {
+		t.Fatalf("stale credential cache returned name %q", got.Name)
+	}
+}
+
+func TestCredentialCacheEventuallyReloadsSameStampInPlaceEdit(t *testing.T) {
+	s := newTestStore(t)
+	created, err := s.CreateCredential(CreateCredentialInput{
+		Name: "before", AccessToken: "access", RefreshToken: "refresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetCredential(created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(s.DataDir(), credentialsFile)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced := strings.Replace(string(data), `"name": "before"`, `"name": "afterx"`, 1)
+	if len(replaced) != len(data) || replaced == string(data) {
+		t.Fatal("test fixture did not produce an equal-size replacement")
+	}
+	if err := os.WriteFile(path, []byte(replaced), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	// Avoid sleeping in the test: expire the guarded cache directly. The next
+	// read must reload even though size, mtime, and inode are unchanged.
+	s.credentialsCacheAt = time.Now().Add(-2 * credentialCacheMaxAge)
+
+	got, err := s.GetCredential(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "afterx" {
+		t.Fatalf("same-stamp edit remained hidden: name=%q", got.Name)
+	}
+}
+
+func TestCredentialCachePreservesDuplicateIDReadSemantics(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	doc := credentialsDoc{Credentials: []Credential{
+		{ID: "duplicate", Name: "first", AccessToken: "a1", RefreshToken: "r1", Enabled: true, CreatedAt: now, UpdatedAt: now},
+		{ID: "duplicate", Name: "second", AccessToken: "a2", RefreshToken: "r2", Enabled: true, CreatedAt: now, UpdatedAt: now},
+	}}
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	path := filepath.Join(s.DataDir(), credentialsFile)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	credentials, err := s.ListCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credentials) != 2 {
+		t.Fatalf("duplicate credentials were collapsed: %+v", credentials)
+	}
+	got, err := s.GetCredential("duplicate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "first" {
+		t.Fatalf("GetCredential returned %q, want first duplicate", got.Name)
+	}
+}
+
 func TestNewRejectsDangerousDataDirs(t *testing.T) {
 	if _, err := New(string(filepath.Separator)); err == nil {
 		t.Fatal("filesystem root must be rejected")
@@ -586,6 +802,446 @@ func TestHashKeyStable(t *testing.T) {
 	}
 	if HashKey("sk-abc") == HashKey("sk-abd") {
 		t.Fatal("different inputs same hash")
+	}
+}
+
+func TestBulkUpsertDoesNotUseSourceKeyAsIdentity(t *testing.T) {
+	s := newTestStore(t)
+	source := "https://auth.x.ai::shared-client"
+	results, err := s.BulkUpsertCredentials([]CreateCredentialInput{
+		{
+			Name: "one", UserID: "user-one", SourceKey: source,
+			OIDCIssuer: "https://auth.x.ai", OIDCClientID: "shared-client",
+			AccessToken: "access-one", RefreshToken: "refresh-one",
+		},
+		{
+			Name: "two", UserID: "user-two", SourceKey: source,
+			OIDCIssuer: "https://auth.x.ai", OIDCClientID: "shared-client",
+			AccessToken: "access-two", RefreshToken: "refresh-two",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || !results[0].Created || !results[1].Created {
+		t.Fatalf("results=%+v", results)
+	}
+	creds, err := s.ListCredentials()
+	if err != nil || len(creds) != 2 {
+		t.Fatalf("credentials=%+v err=%v", creds, err)
+	}
+}
+
+func TestBulkUpsertKeepsSameUserSeparateAcrossOIDCClients(t *testing.T) {
+	s := newTestStore(t)
+	results, err := s.BulkUpsertCredentials([]CreateCredentialInput{
+		{
+			UserID: "shared-user", OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client-one",
+			AccessToken: "access-one", RefreshToken: "refresh-one",
+		},
+		{
+			UserID: "shared-user", OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client-two",
+			AccessToken: "access-two", RefreshToken: "refresh-two",
+		},
+		{
+			Email: "same@example.test", OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client-three",
+			AccessToken: "access-three", RefreshToken: "refresh-three",
+		},
+		{
+			Email: "SAME@example.test", OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client-four",
+			AccessToken: "access-four", RefreshToken: "refresh-four",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("results=%+v", results)
+	}
+	for _, result := range results {
+		if !result.Created {
+			t.Fatalf("OIDC-scoped identities were merged: %+v", results)
+		}
+	}
+	creds, err := s.ListCredentials()
+	if err != nil || len(creds) != 4 {
+		t.Fatalf("credentials=%+v err=%v", creds, err)
+	}
+}
+
+func TestCredentialWritesRejectInvalidProxyConfiguration(t *testing.T) {
+	s := newTestStore(t)
+	base := CreateCredentialInput{AccessToken: "access", RefreshToken: "refresh"}
+	tests := []struct {
+		name string
+		mode string
+		url  string
+	}{
+		{name: "unknown mode", mode: "automatic"},
+		{name: "url missing", mode: CredentialProxyURL},
+		{name: "url with direct", mode: CredentialProxyDirect, url: "http://proxy.test:8080"},
+		{name: "unsupported scheme", mode: CredentialProxyURL, url: "file:///tmp/proxy"},
+		{name: "query", mode: CredentialProxyURL, url: "http://proxy.test:8080?secret=x"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := base
+			input.ProxyMode = test.mode
+			input.ProxyURL = test.url
+			if _, _, err := s.UpsertCredential(input); err == nil {
+				t.Fatal("expected invalid proxy configuration to be rejected")
+			}
+		})
+	}
+	valid := base
+	valid.ProxyMode = CredentialProxyURL
+	valid.ProxyURL = "socks5h://user:pass@proxy.test:1080"
+	if _, _, err := s.UpsertCredential(valid); err != nil {
+		t.Fatalf("valid proxy rejected: %v", err)
+	}
+}
+
+func TestCredentialWritesRejectUntrustedIssuer(t *testing.T) {
+	s := newTestStore(t)
+	for _, issuer := range []string{
+		"https://evil.example",
+		"https://preview.auth.x.ai",
+		"https://auth.x.ai/tenant",
+		"http://auth.x.ai",
+	} {
+		_, _, err := s.UpsertCredential(CreateCredentialInput{
+			AccessToken: "access", RefreshToken: "refresh", OIDCIssuer: issuer,
+		})
+		if err == nil {
+			t.Fatalf("untrusted issuer accepted: %q", issuer)
+		}
+	}
+}
+
+func TestBulkUpsertStorageFailureLeavesExistingDocumentUnchanged(t *testing.T) {
+	s := newTestStore(t)
+	if _, _, err := s.UpsertCredential(CreateCredentialInput{
+		UserID: "existing", AccessToken: "access-existing", RefreshToken: "refresh-existing",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.DataDir(), credentialsFile)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(s.DataDir(), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	_, upsertErr := s.BulkUpsertCredentials([]CreateCredentialInput{
+		{UserID: "new-one", AccessToken: "access-one", RefreshToken: "refresh-one"},
+		{UserID: "new-two", AccessToken: "access-two", RefreshToken: "refresh-two"},
+	})
+	if err := os.Chmod(s.DataDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if upsertErr == nil {
+		t.Fatal("expected atomic write failure")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("credentials document changed after failed bulk write")
+	}
+}
+
+func TestBulkUpsertAndConcurrentPatchesDoNotLoseHealth(t *testing.T) {
+	s := newTestStore(t)
+	created, _, err := s.UpsertCredential(CreateCredentialInput{
+		UserID: "concurrent-user", OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client",
+		AccessToken: "access-initial", RefreshToken: "refresh-initial",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const iterations = 40
+	var wait sync.WaitGroup
+	for i := 0; i < iterations; i++ {
+		i := i
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			_, _ = s.PatchCredential(created.ID, func(credential *Credential) error {
+				credential.FailureCount++
+				return nil
+			})
+		}()
+		go func() {
+			defer wait.Done()
+			_, _ = s.BulkUpsertCredentials([]CreateCredentialInput{{
+				UserID: "concurrent-user", OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client",
+				AccessToken: fmt.Sprintf("access-%d", i), RefreshToken: fmt.Sprintf("refresh-%d", i),
+			}})
+		}()
+	}
+	wait.Wait()
+	got, err := s.GetCredential(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FailureCount != iterations {
+		t.Fatalf("health patches lost: got %d want %d", got.FailureCount, iterations)
+	}
+	if !strings.HasPrefix(got.AccessToken, "access-") || !strings.HasPrefix(got.RefreshToken, "refresh-") {
+		t.Fatalf("rotated tokens not persisted: %+v", got)
+	}
+}
+
+func TestRotatedImportClearsAutomaticQuarantineOnly(t *testing.T) {
+	s := newTestStore(t)
+	created, _, err := s.UpsertCredential(CreateCredentialInput{
+		UserID: "user-q", OIDCClientID: "client",
+		AccessToken: "old-access", RefreshToken: "old-refresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := s.QuarantineCredential(created.ID, DisableReasonInvalidAuth, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	updated, wasCreated, err := s.UpsertCredential(CreateCredentialInput{
+		UserID: "user-q", OIDCClientID: "client",
+		AccessToken: "new-access", RefreshToken: "new-refresh",
+	})
+	if err != nil || wasCreated {
+		t.Fatalf("created=%v err=%v", wasCreated, err)
+	}
+	if !updated.Enabled || updated.LifecycleState != CredentialStateActive || updated.DisableReason != "" {
+		t.Fatalf("automatic quarantine not cleared: %+v", updated)
+	}
+	if _, err := s.SetCredentialEnabled(created.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	updated, _, err = s.UpsertCredential(CreateCredentialInput{
+		UserID: "user-q", OIDCClientID: "client",
+		AccessToken: "newer-access", RefreshToken: "newer-refresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Enabled || !updated.ManualDisabled || updated.DisableReason != DisableReasonManual {
+		t.Fatalf("manual disable was overwritten: %+v", updated)
+	}
+}
+
+func TestDeleteCredentialIfPurgeEligibleRejectsRotatedToken(t *testing.T) {
+	s := newTestStore(t)
+	created, err := s.CreateCredential(CreateCredentialInput{
+		Name: "purge-race", AccessToken: "old-access", RefreshToken: "old-refresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	purgeAfter := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	quarantined, err := s.QuarantineCredential(created.ID, DisableReasonInvalidAuth, time.Now(), &purgeAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedFingerprint := quarantined.QuarantineTokenFingerprint
+	if _, err := s.PatchCredential(created.ID, func(credential *Credential) error {
+		credential.AccessToken = "new-access"
+		credential.RefreshToken = "new-refresh"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := s.DeleteCredentialIfPurgeEligible(created.ID, quarantined.Revision, purgeAfter, expectedFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Fatal("credential with a rotated token was deleted")
+	}
+	got, err := s.GetCredential(created.ID)
+	if err != nil || got.AccessToken != "new-access" {
+		t.Fatalf("credential=%+v err=%v", got, err)
+	}
+}
+
+func TestDeleteCredentialIfPurgeEligibleDeletesMatchingDueQuarantine(t *testing.T) {
+	s := newTestStore(t)
+	created, err := s.CreateCredential(CreateCredentialInput{
+		Name: "purge-ready", AccessToken: "access", RefreshToken: "refresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	purgeAfter := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	quarantined, err := s.QuarantineCredential(created.ID, DisableReasonInvalidAuth, time.Now(), &purgeAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := s.DeleteCredentialIfPurgeEligible(created.ID, quarantined.Revision, purgeAfter, quarantined.QuarantineTokenFingerprint)
+	if err != nil || !deleted {
+		t.Fatalf("deleted=%v err=%v", deleted, err)
+	}
+	if _, err := s.GetCredential(created.ID); err == nil {
+		t.Fatal("matching due quarantine still exists")
+	}
+}
+
+func TestCredentialRevisionIncrementsOnEveryPersistedMutation(t *testing.T) {
+	s := newTestStore(t)
+	created, err := s.CreateCredential(CreateCredentialInput{Name: "revision", AccessToken: "access"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Revision == 0 {
+		t.Fatal("new credential has no revision")
+	}
+	patched, err := s.PatchCredential(created.ID, func(credential *Credential) error {
+		credential.ProxyMode = CredentialProxyDirect
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patched.Revision != created.Revision+1 {
+		t.Fatalf("patched revision=%d created=%d", patched.Revision, created.Revision)
+	}
+	patched.Enabled = false
+	updated, err := s.UpdateCredential(patched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Revision != patched.Revision+1 {
+		t.Fatalf("updated revision=%d patched=%d", updated.Revision, patched.Revision)
+	}
+}
+
+func TestRequarantineAfterTokenImportUsesNewFingerprintAndCanPurge(t *testing.T) {
+	s := newTestStore(t)
+	created, err := s.CreateCredential(CreateCredentialInput{
+		Name: "re-quarantine", UserID: "user-1", OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client-1",
+		AccessToken: "old-access", RefreshToken: "old-refresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	firstPurge := now.Add(time.Hour)
+	results, err := s.ApplyInspectionActions([]InspectionAction{{
+		ID: created.ID, ExpectedRevision: created.Revision, Kind: InspectionActionQuarantine,
+		At: now, PurgeAfter: &firstPurge,
+	}})
+	if err != nil || len(results) != 1 || !results[0].Quarantined {
+		t.Fatalf("first quarantine results=%+v err=%v", results, err)
+	}
+
+	imported, wasCreated, err := s.UpsertCredential(CreateCredentialInput{
+		Name: "re-quarantine", UserID: "user-1", OIDCIssuer: "https://auth.x.ai", OIDCClientID: "client-1",
+		AccessToken: "new-access", RefreshToken: "new-refresh",
+	})
+	if err != nil || wasCreated {
+		t.Fatalf("imported=%+v created=%v err=%v", imported, wasCreated, err)
+	}
+	if !imported.Enabled || imported.LifecycleState != CredentialStateActive || imported.QuarantineTokenFingerprint != "" {
+		t.Fatalf("import did not clear quarantine evidence: %+v", imported)
+	}
+
+	past := now.Add(-time.Minute)
+	results, err = s.ApplyInspectionActions([]InspectionAction{{
+		ID: imported.ID, ExpectedRevision: imported.Revision, Kind: InspectionActionQuarantine,
+		At: now.Add(-2 * time.Minute), PurgeAfter: &past,
+	}})
+	if err != nil || len(results) != 1 || !results[0].Quarantined {
+		t.Fatalf("second quarantine results=%+v err=%v", results, err)
+	}
+	requarantined, err := s.GetCredential(imported.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedFingerprint := credentialTokenFingerprint(requarantined)
+	if requarantined.QuarantineTokenFingerprint != expectedFingerprint {
+		t.Fatalf("fingerprint=%q want %q", requarantined.QuarantineTokenFingerprint, expectedFingerprint)
+	}
+
+	results, err = s.ApplyInspectionActions([]InspectionAction{{
+		ID: requarantined.ID, ExpectedRevision: requarantined.Revision, Kind: InspectionActionPurge,
+		At: now, ExpectedPurgeAfter: requarantined.PurgeAfter,
+		ExpectedTokenFingerprint: requarantined.QuarantineTokenFingerprint,
+	}})
+	if err != nil || len(results) != 1 || !results[0].Deleted {
+		t.Fatalf("purge results=%+v err=%v", results, err)
+	}
+	if _, err := s.GetCredential(requarantined.ID); err == nil {
+		t.Fatal("re-quarantined credential was not purged")
+	}
+}
+
+func TestRuntimeSettingsRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	if exists, err := s.RuntimeSettingsExist(); err != nil || exists {
+		t.Fatalf("unexpected initial settings snapshot: exists=%v err=%v", exists, err)
+	}
+	defaults := DefaultRuntimeSettings()
+	defaults.GlobalProxy = GlobalProxySettings{Mode: "direct"}
+	got, err := s.LoadRuntimeSettings(defaults)
+	if err != nil || got.GlobalProxy.Mode != "direct" {
+		t.Fatalf("defaults=%+v err=%v", got, err)
+	}
+	got.GlobalProxy = GlobalProxySettings{Mode: "url", URL: "http://user:pass@proxy.test:8080"}
+	got.Inspection.Enabled = true
+	if _, err := s.SaveRuntimeSettings(got); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := s.RuntimeSettingsExist(); err != nil || !exists {
+		t.Fatalf("saved settings snapshot not detected: exists=%v err=%v", exists, err)
+	}
+	reloaded, err := s.LoadRuntimeSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.GlobalProxy.URL != got.GlobalProxy.URL || !reloaded.Inspection.Enabled {
+		t.Fatalf("reloaded=%+v", reloaded)
+	}
+	info, err := os.Stat(filepath.Join(s.DataDir(), settingsFile))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("settings mode=%v err=%v", info.Mode().Perm(), err)
+	}
+}
+
+func TestRuntimeSettingsRejectsSSOSidecarLimitMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mut  func(*RuntimeSettings)
+	}{
+		{"timeout", func(settings *RuntimeSettings) {
+			settings.SSOConverter.TimeoutSec = MaxSSOConverterTimeoutSec + 1
+		}},
+		{"batch", func(settings *RuntimeSettings) {
+			settings.SSOConverter.MaxBatch = MaxSSOConverterBatch + 1
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings := DefaultRuntimeSettings()
+			tc.mut(&settings)
+			if err := settings.Validate(); err == nil {
+				t.Fatal("expected SSO converter limit validation error")
+			}
+		})
+	}
+}
+
+func TestRuntimeSettingsRejectsOrNormalizesNonFiniteMassFailureRatio(t *testing.T) {
+	for _, ratio := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		settings := DefaultRuntimeSettings()
+		settings.Inspection.MassFailureRatio = ratio
+		if err := settings.Validate(); err == nil {
+			t.Fatalf("accepted non-finite mass_failure_ratio %v", ratio)
+		}
+		normalized := normalizeRuntimeSettings(settings, DefaultRuntimeSettings())
+		if normalized.Inspection.MassFailureRatio != DefaultRuntimeSettings().Inspection.MassFailureRatio {
+			t.Fatalf("ratio %v normalized to %v", ratio, normalized.Inspection.MassFailureRatio)
+		}
 	}
 }
 

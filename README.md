@@ -37,7 +37,11 @@ OpenAI 兼容客户端。
 - Summarized / Omitted Thinking Block
 - 工具轮次间的加密 Reasoning 回放
 - 多账号选择、会话粘滞、冷却和故障切换
-- Grok CLI 凭据导入和浏览器 OAuth Device Login
+- Grok/CPA JSON、多文件及可选 SSO 批量导入
+- 全局与凭据级 HTTP(S)/SOCKS 出站代理
+- 保守的自动巡检、401 确认隔离、429 冷却及可选延迟清理
+- Grok Build 共享周额度主视图与原始账单诊断
+- 浏览器 OAuth Device Login
 - 带文件锁、原子写入和备份恢复的本地 JSON 存储
 - 内嵌 Admin Web UI
 - 健康检查、Readiness、Prometheus 指标、Request ID 和结构化日志
@@ -83,7 +87,7 @@ irm https://raw.githubusercontent.com/GreyGunG/grokbuild-proxy/main/scripts/inst
 ```
 
 安装脚本会自动识别系统与架构、下载最新 Release、验证 SHA-256、安装
-二进制并生成本地配置。可以通过 `GROKBUILD_VERSION=v0.1.0` 固定版本。
+二进制并生成本地配置。可以通过 `GROKBUILD_VERSION=v0.2.0` 固定版本。
 
 ## 源码运行
 
@@ -164,10 +168,58 @@ docker compose exec grokbuild-proxy sh -c 'cat /app/data/meta.json'
 
 Compose 只在宿主机发布 `127.0.0.1:8080`，运行状态保存在命名卷中。
 
+### 可选 SSO 批量导入服务
+
+SSO 转换 sidecar 默认不启动，也不向宿主机发布端口。启用前生成一个随机
+Bearer Key，并在 `config.yaml` 的 `sso_converter` 中填写同一个值：
+
+```yaml
+sso_converter:
+  enabled: true
+  endpoint: "http://sso-import:8090"
+  api_key: "替换为随机密钥"
+  allow_insecure_http: true
+  timeout_sec: 300
+  max_batch: 50
+```
+
+随后用相同密钥启动 `sso-import` profile：
+
+```bash
+export SSO_CONVERTER_API_TOKEN='替换为与 config.yaml 相同的随机密钥'
+docker compose --profile sso-import up --build -d
+docker compose --profile sso-import ps
+```
+
+以上命令适用于源码检出。GitHub Release 的二进制归档还包含一个仅使用已发布
+GHCR 镜像的 Compose 文件，无需 Go、Python 或本地镜像构建：
+
+```bash
+cp config.example.yaml config.yaml
+export SSO_CONVERTER_API_TOKEN='替换为与 config.yaml 相同的随机密钥'
+export GROKBUILD_CONTAINER_TAG=0.1.1
+docker compose -f docker-compose.release.yml --profile sso-import pull
+docker compose -f docker-compose.release.yml --profile sso-import up -d
+```
+
+发布版 Compose 要求显式设置同一个精确版本标签，避免代理与 sidecar 因移动标签更新不同步而混用版本。
+
+`allow_insecure_http` 只用于 Compose 的隔离内部网络。sidecar 通过独立出站网络
+访问 x.ai；不要为 `sso-import` 添加 `ports`。如需为转换流程配置代理，可额外
+设置 `SSO_CONVERTER_PROXY`。完整安全和运维说明见
+[SSO 转换服务说明](grok2api-sso-to-grokbuild/README)。
+
+代理访问 loopback、私网 IP 或单标签 sidecar 名称时强制直连，不会把原始 SSO
+和 sidecar Bearer Key 转发给全局 HTTP 代理；sidecar 访问 x.ai 的代理策略独立配置。
+
+`max_batch` 硬上限为 100，`timeout_sec` 范围为 1–300 秒。代理不会跟随
+sidecar 返回的重定向，避免 SSO 与 Bearer 密钥被重放到其他地址。
+
 预构建镜像：
 
 ```text
 ghcr.io/greygung/grokbuild-proxy
+ghcr.io/greygung/grokbuild-proxy-sso-import
 ```
 
 ## 配置
@@ -185,6 +237,10 @@ ghcr.io/greygung/grokbuild-proxy
 | `oauth.*` | xAI OAuth Issuer、Client、Scope 和回调 |
 | `anthropic.model_aliases` | Claude 模型到 Grok 模型的映射 |
 | `lb.*` | 凭据选择、会话粘滞、刷新和冷却策略 |
+| `proxy.*` | 默认出站代理模式和 URL；Admin 运行时设置可覆盖 |
+| `sso_converter.*` | 可选 SSO 转换服务地址、密钥和边界 |
+| `inspection.*` | 定时巡检、并发、熔断和延迟清理策略 |
+| `import.*` | 文件数、单文件/总大小、条目数、全局排队任务/字节预算和任务保留期 |
 | `limits.*` | Body、超时和并发限制 |
 | `logging.level` | `debug`、`info`、`warn` 或 `error` |
 

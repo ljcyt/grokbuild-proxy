@@ -3,6 +3,7 @@ package lb
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -416,10 +417,31 @@ func TestStickyBindingsAreBounded(t *testing.T) {
 	}
 	selector.bindSticky("new-session", "credential", now)
 	count := len(selector.sticky)
-	_, keptNew := selector.sticky["new-session"]
+	_, keptNew := selector.sticky[stickyMapKey("new-session")]
 	selector.mu.Unlock()
 	if count != maxStickyBindings || !keptNew {
 		t.Fatalf("sticky count=%d kept_new=%v", count, keptNew)
+	}
+}
+
+func TestStickyMapHashesUntrustedSessionKeys(t *testing.T) {
+	selector := New(testCfg("priority_rr"))
+	credential := storage.Credential{ID: "cred", Enabled: true}
+	huge := strings.Repeat("x", 2<<20)
+	now := time.Now()
+	if _, err := selector.Pick([]storage.Credential{credential}, huge, now); err != nil {
+		t.Fatal(err)
+	}
+	selector.MarkSuccess(credential.ID, huge, now)
+	selector.mu.Lock()
+	defer selector.mu.Unlock()
+	if len(selector.sticky) != 1 {
+		t.Fatalf("sticky entries=%d", len(selector.sticky))
+	}
+	for key := range selector.sticky {
+		if len(key) != 64 || strings.Contains(key, huge[:128]) {
+			t.Fatalf("unbounded sticky key retained: len=%d", len(key))
+		}
 	}
 }
 

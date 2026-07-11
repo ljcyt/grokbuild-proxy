@@ -12,23 +12,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: grok2api-sso-to-grokbuild/requirements.txt
       - name: Check formatting
         run: test -z "$(gofmt -l ./cmd ./internal)"
       - name: Vet
         run: go vet ./...
       - name: Test with race detector
         run: go test -race ./...
+      - name: Test SSO converter sidecar
+        working-directory: grok2api-sso-to-grokbuild
+        run: |
+          python -m pip install -r requirements.txt
+          python -m unittest discover -s tests -v
       - name: Build
         run: go build -trimpath ./cmd/grokbuild-proxy
-      - name: Cross-compile release targets
-        run: |
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o /tmp/grokbuild-proxy.exe ./cmd/grokbuild-proxy
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o /tmp/grokbuild-proxy-darwin ./cmd/grokbuild-proxy
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/grokbuild-proxy-linux-arm64 ./cmd/grokbuild-proxy
+      - name: Build and inspect release archives
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --snapshot --clean --skip=before,sbom
+      - name: Verify release archive payload
+        run: sh scripts/verify-release-archive.sh dist
       - name: Vulnerability scan
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -40,6 +55,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image
         run: docker build --build-arg VERSION=ci-${{ github.sha }} -t grokbuild-proxy:ci .
+      - name: Validate and build SSO import profile
+        env:
+          SSO_CONVERTER_API_TOKEN: ci-only-token
+          GROKBUILD_CONTAINER_TAG: 0.0.0-ci
+        run: |
+          docker compose --profile sso-import config
+          docker compose --profile sso-import build sso-import
+          docker compose -f docker-compose.release.yml --profile sso-import config
       - name: Smoke test
         run: |
           docker run -d --name grokbuild-proxy-ci \

@@ -82,6 +82,20 @@ func TestSanitizeResponses_PreserveReasoningAndAggregateSystem(t *testing.T) {
 	}
 }
 
+func TestSanitizeResponsesRejectsOversizedPromptCacheKey(t *testing.T) {
+	oversized := strings.Repeat("x", MaxPromptCacheKeyBytes+1)
+	raw, err := json.Marshal(map[string]any{"model": "grok-4.5", "input": "hi", "prompt_cache_key": oversized})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SanitizeResponses(raw, ""); err == nil || !strings.Contains(err.Error(), "prompt_cache_key") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := SanitizeResponses([]byte(`{"model":"grok-4.5","input":"hi"}`), oversized); err == nil {
+		t.Fatal("oversized header-derived conversation id was accepted")
+	}
+}
+
 func TestSanitizeResponses_ReasoningEffortAlias(t *testing.T) {
 	tests := []struct {
 		name       string

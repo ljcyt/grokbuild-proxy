@@ -1,14 +1,14 @@
-/* grokbuild Admin SPA — hash routes, sessionStorage admin key, textContent-only DOM */
+/* grokbuild Admin SPA — in-memory admin key, textContent-only DOM */
 (function () {
   "use strict";
 
-  var STORAGE_KEY = "grokbuild_admin_key";
   var API_BASE = "";
 
   var state = {
     key: "",
     route: "login",
     system: null,
+    settings: null,
     busy: false,
   };
 
@@ -36,25 +36,6 @@
 
   function setText(node, text) {
     if (node) node.textContent = text == null ? "" : String(text);
-  }
-
-  // ---------- Storage ----------
-
-  function loadKey() {
-    try {
-      return sessionStorage.getItem(STORAGE_KEY) || "";
-    } catch (_) {
-      return "";
-    }
-  }
-
-  function saveKey(key) {
-    try {
-      if (key) sessionStorage.setItem(STORAGE_KEY, key);
-      else sessionStorage.removeItem(STORAGE_KEY);
-    } catch (_) {
-      /* ignore quota / private mode */
-    }
   }
 
   // ---------- Toast ----------
@@ -142,6 +123,34 @@
     });
   }
 
+  function apiForm(method, path, form) {
+    var headers = { Accept: "application/json" };
+    if (state.key) headers.Authorization = "Bearer " + state.key;
+    return fetch(API_BASE + path, { method: method, headers: headers, body: form }).then(function (res) {
+      return res.text().then(function (text) {
+        var data = null;
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch (_) {
+            data = { raw: text };
+          }
+        }
+        if (res.status === 401) {
+          logout(true);
+          throw new Error(apiErrorMessage(data, res.status) || "未授权");
+        }
+        if (!res.ok) {
+          var err = new Error(apiErrorMessage(data, res.status));
+          err.status = res.status;
+          err.data = data;
+          throw err;
+        }
+        return data;
+      });
+    });
+  }
+
   // ---------- Routing ----------
 
   function parseRoute() {
@@ -187,11 +196,13 @@
     setActiveNav(route);
     show($("page-credentials"), route === "credentials");
     show($("page-clients"), route === "clients");
+    show($("page-settings"), route === "settings");
     show($("page-system"), route === "system");
     show($("page-integration"), route === "integration");
 
     if (route === "credentials") loadCredentials();
     else if (route === "clients") loadClients();
+    else if (route === "settings") loadSettings();
     else if (route === "system") loadSystem();
     else if (route === "integration") renderIntegration();
   }
@@ -201,7 +212,6 @@
   function logout(silent) {
     state.key = "";
     state.system = null;
-    saveKey("");
     if (!silent) toast("已退出", "ok");
     navigate("login");
     render();
@@ -222,7 +232,6 @@
     return api("GET", "/admin/system")
       .then(function (sys) {
         state.system = sys;
-        saveKey(key);
         setText($("shell-version"), (sys && sys.version) || "管理后台");
         toast("登录成功", "ok");
         navigate("credentials");
@@ -255,6 +264,19 @@
     if (!id) return "—";
     if (id.length <= 12) return id;
     return id.slice(0, 6) + "…" + id.slice(-4);
+  }
+
+  function inspectionStatusText(status) {
+    var labels = {
+      healthy: "健康",
+      unauthorized: "认证失效",
+      unauthorized_unconfirmed: "待确认的认证失效",
+      rate_limited: "触发限流",
+      mass_failure_guard: "批量异常保护",
+      state_changed: "凭证已变更，结果未应用",
+      settings_changed: "巡检设置已变更，结果未应用",
+    };
+    return labels[status] || status || "未记录";
   }
 
   // ---------- Credentials ----------
@@ -294,10 +316,11 @@
     }
     top.appendChild(left);
 
+    var quarantined = c.lifecycle_state === "quarantined";
     var badge = el(
       "span",
-      "badge " + (c.enabled ? "badge-ok" : "badge-off"),
-      c.enabled ? "已启用" : "已禁用"
+      "badge " + (c.enabled ? "badge-ok" : quarantined ? "badge-danger" : "badge-off"),
+      c.enabled ? "已启用" : quarantined ? "已隔离" : "已禁用"
     );
     top.appendChild(badge);
     card.appendChild(top);
@@ -306,6 +329,14 @@
     meta.appendChild(lineMeta("编号", shortId(c.id)));
     meta.appendChild(lineMeta("优先级", String(c.priority != null ? c.priority : 0)));
     meta.appendChild(lineMeta("过期时间", fmtTime(c.expires_at)));
+    meta.appendChild(
+      lineMeta(
+        "出站代理",
+        c.proxy_mode === "url" ? c.proxy_url || "已配置" : c.proxy_mode === "direct" ? "直连" : "继承全局"
+      )
+    );
+    if (c.disable_reason) meta.appendChild(lineMeta("停用原因", c.disable_reason));
+    if (c.quarantined_at) meta.appendChild(lineMeta("隔离时间", fmtTime(c.quarantined_at)));
     meta.appendChild(
       lineMeta(
         "令牌",
@@ -326,6 +357,13 @@
     }
     if (c.cooldown_until) {
       meta.appendChild(lineMeta("冷却至", fmtTime(c.cooldown_until)));
+    }
+    if (c.last_inspection_at || c.last_inspection_status || c.last_inspection_error) {
+      meta.appendChild(lineMeta("最近巡检", fmtTime(c.last_inspection_at)));
+      meta.appendChild(lineMeta("巡检结果", inspectionStatusText(c.last_inspection_status)));
+      if (c.last_inspection_error) {
+        meta.appendChild(lineMeta("巡检详情", c.last_inspection_error));
+      }
     }
     if (c.access_token) {
       meta.appendChild(lineMeta("访问令牌(脱敏)", c.access_token));
@@ -412,6 +450,13 @@
     });
     actions.appendChild(refresh);
 
+    var proxyBtn = el("button", "btn btn-sm", "代理");
+    proxyBtn.type = "button";
+    proxyBtn.addEventListener("click", function () {
+      showCredentialProxy(c);
+    });
+    actions.appendChild(proxyBtn);
+
     var billing = el("button", "btn btn-sm", "账单");
     billing.type = "button";
     billing.addEventListener("click", function () {
@@ -440,6 +485,68 @@
 
     card.appendChild(actions);
     return card;
+  }
+
+  function showCredentialProxy(c) {
+    var body = el("div", "stack");
+    var modeField = el("label", "field");
+    modeField.appendChild(el("span", "label", "代理模式"));
+    var mode = el("select");
+    [
+      ["inherit", "继承全局"],
+      ["direct", "强制直连"],
+      ["url", "自定义代理 URL"],
+    ].forEach(function (value) {
+      var option = el("option", "", value[1]);
+      option.value = value[0];
+      option.selected = (c.proxy_mode || "inherit") === value[0];
+      mode.appendChild(option);
+    });
+    modeField.appendChild(mode);
+    body.appendChild(modeField);
+    var urlField = el("label", "field");
+    urlField.appendChild(el("span", "label", "代理 URL"));
+    var proxyURL = el("input");
+    proxyURL.type = "password";
+    proxyURL.placeholder = "http://user:pass@host:port 或 socks5h://host:port";
+    urlField.appendChild(proxyURL);
+    body.appendChild(urlField);
+    body.appendChild(el("p", "muted", "现有代理密码不会回显；切换为自定义 URL 时需重新完整输入。"));
+    function sync() {
+      proxyURL.disabled = mode.value !== "url";
+    }
+    mode.addEventListener("change", sync);
+    sync();
+
+    var cancel = el("button", "btn", "取消");
+    cancel.type = "button";
+    cancel.addEventListener("click", closeModal);
+    var save = el("button", "btn btn-primary", "保存");
+    save.type = "button";
+    save.addEventListener("click", function () {
+      if (mode.value === "url" && !(proxyURL.value || "").trim()) {
+        toast("请输入完整代理 URL", "err");
+        return;
+      }
+      save.disabled = true;
+      api("PUT", "/admin/credentials/" + encodeURIComponent(c.id) + "/proxy", {
+        mode: mode.value,
+        url: (proxyURL.value || "").trim(),
+      })
+        .then(function () {
+          proxyURL.value = "";
+          toast("凭证代理已更新", "ok");
+          closeModal();
+          loadCredentials();
+        })
+        .catch(function (err) {
+          toast("代理设置失败: " + err.message, "err");
+        })
+        .finally(function () {
+          save.disabled = false;
+        });
+    });
+    openModal("凭证代理 · " + (c.name || c.email || shortId(c.id)), body, [cancel, save]);
   }
 
   function lineMeta(label, value) {
@@ -496,9 +603,17 @@
     api("GET", "/admin/credentials/" + encodeURIComponent(credId) + "/billing")
       .then(function (snap) {
         clear(box);
-        var u = parseUsage(snap);
-        box.appendChild(usageBar("月额度", u.monthPct, u.monthLabel, u.monthTone));
-        box.appendChild(usageBar("周额度", u.weekPct, u.weekLabel, u.weekTone));
+        var build = (snap && snap.grok_build) || {};
+        if (!build.reported || build.shared_weekly_usage_percent == null) {
+          box.appendChild(usageBar("Grok Build", 0, "未报告", "neutral"));
+          return;
+        }
+        var pct = num(build.shared_weekly_usage_percent);
+        var label = "共享周额度已用 " + pct.toFixed(1) + "%";
+        if (build.grok_build_contribution_percent != null) {
+          label += " · Build 贡献 " + num(build.grok_build_contribution_percent).toFixed(1) + "%";
+        }
+        box.appendChild(usageBar("Grok Build", pct, label, toneFromPct(pct)));
       })
       .catch(function (err) {
         clear(box);
@@ -509,11 +624,11 @@
   function parseUsage(snap) {
     var m = (snap && snap.monthly) || {};
     var w = (snap && snap.weekly) || {};
-    var limit = num(m.monthlyLimit);
-    var used = num(m.used);
-    var rem = Math.max(0, limit - used);
-    var monthPct = limit > 0 ? (used / limit) * 100 : 0;
-    var weekPct = num(w.creditUsagePercent);
+    var limit = optionalNum(m.monthlyLimit);
+    var used = optionalNum(m.used);
+    var rem = limit != null && used != null ? Math.max(0, limit - used) : null;
+    var monthPct = limit != null && limit > 0 && used != null ? (used / limit) * 100 : null;
+    var weekPct = optionalNum(w.creditUsagePercent);
     return {
       limit: limit,
       used: used,
@@ -521,14 +636,14 @@
       monthPct: monthPct,
       weekPct: weekPct,
       monthLabel:
-        limit > 0
+        limit != null && limit > 0 && used != null
           ? fmtNum(used) + " / " + fmtNum(limit) + "（剩 " + fmtNum(rem) + "）"
-          : used > 0
+          : used != null
             ? "已用 " + fmtNum(used) + "（无限额字段）"
-            : "暂无月额度数据",
-      weekLabel: weekPct > 0 || weekPct === 0 ? weekPct.toFixed(1) + "%" : "暂无",
-      monthTone: toneFromPct(monthPct),
-      weekTone: toneFromPct(weekPct),
+            : "未报告",
+      weekLabel: weekPct != null ? weekPct.toFixed(1) + "%" : "未报告",
+      monthTone: monthPct != null ? toneFromPct(monthPct) : "neutral",
+      weekTone: weekPct != null ? toneFromPct(weekPct) : "neutral",
       period:
         (m.billingPeriodStart || "") && (m.billingPeriodEnd || "")
           ? fmtDay(m.billingPeriodStart) + " → " + fmtDay(m.billingPeriodEnd)
@@ -549,7 +664,7 @@
         .map(function (p) {
           return {
             name: p.product || p.name || "?",
-            pct: num(p.usagePercent != null ? p.usagePercent : p.usage_percent),
+            pct: optionalNum(p.usagePercent != null ? p.usagePercent : p.usage_percent),
           };
         })
         .filter(function (p) {
@@ -562,6 +677,7 @@
 
   function renderBillingDashboard(snap) {
     var u = parseUsage(snap);
+    var build = (snap && snap.grok_build) || {};
     var wrap = el("div", "stack billing-dash");
 
     var hero = el("div", "billing-hero");
@@ -570,55 +686,68 @@
       el(
         "div",
         "billing-hero-value",
-        u.limit > 0 ? fmtNum(u.rem) + " 剩余" : "—"
+        build.reported && build.shared_weekly_usage_percent != null
+          ? num(build.shared_weekly_usage_percent).toFixed(1) + "% 已用"
+          : "未报告"
       )
     );
     hero.appendChild(
       el(
         "div",
         "muted",
-        u.limit > 0
-          ? "本月已用 " + fmtNum(u.used) + " / " + fmtNum(u.limit)
-          : "上游未返回月额度上限"
+        build.grok_build_contribution_percent != null
+          ? "Grok Build 对共享周额度池的消耗贡献 " + num(build.grok_build_contribution_percent).toFixed(1) + "%（不是独立上限）"
+          : "共享周额度；上游未单独报告 Grok Build 消耗贡献"
       )
     );
     wrap.appendChild(hero);
 
-    wrap.appendChild(usageBar("月额度使用", u.monthPct, u.monthLabel, u.monthTone));
-    wrap.appendChild(usageBar("周额度使用", u.weekPct, u.weekLabel, u.weekTone));
+    if (build.reported && build.shared_weekly_usage_percent != null) {
+      wrap.appendChild(usageBar("共享周额度", num(build.shared_weekly_usage_percent), num(build.shared_weekly_usage_percent).toFixed(1) + "%", toneFromPct(num(build.shared_weekly_usage_percent))));
+    }
 
+    var diagnostics = el("details", "raw-details");
+    diagnostics.appendChild(el("summary", "", "诊断：月度/API 与产品明细"));
     var grid = el("div", "billing-grid");
-    grid.appendChild(statCard("月已用", fmtNum(u.used)));
-    grid.appendChild(statCard("月上限", u.limit > 0 ? fmtNum(u.limit) : "—"));
-    grid.appendChild(statCard("月剩余", u.limit > 0 ? fmtNum(u.rem) : "—"));
-    grid.appendChild(statCard("周用量", u.weekPct.toFixed(1) + "%"));
-    wrap.appendChild(grid);
+    grid.appendChild(statCard("月已用", u.used != null ? fmtNum(u.used) : "未报告"));
+    grid.appendChild(statCard("月上限", u.limit != null ? fmtNum(u.limit) : "未报告"));
+    grid.appendChild(statCard("月剩余", u.rem != null ? fmtNum(u.rem) : "未报告"));
+    grid.appendChild(statCard("周用量", u.weekPct != null ? u.weekPct.toFixed(1) + "%" : "未报告"));
+    diagnostics.appendChild(grid);
 
     if (u.period) {
-      wrap.appendChild(lineMeta("月账期", u.period));
+      diagnostics.appendChild(lineMeta("月账期", u.period));
     }
     if (u.weekEnd) {
-      wrap.appendChild(lineMeta("周账期结束", u.weekEnd));
+      diagnostics.appendChild(lineMeta("周账期结束", u.weekEnd));
     }
 
     if (u.products.length) {
-      wrap.appendChild(el("div", "section-label", "产品用量"));
+      diagnostics.appendChild(el("div", "section-label", "产品用量"));
       u.products.forEach(function (p) {
-        wrap.appendChild(
-          usageBar(p.name, p.pct, p.pct.toFixed(1) + "%", toneFromPct(p.pct))
+        diagnostics.appendChild(
+          usageBar(
+            p.name,
+            p.pct != null ? p.pct : 0,
+            p.pct != null ? p.pct.toFixed(1) + "%" : "未报告",
+            p.pct != null ? toneFromPct(p.pct) : "neutral"
+          )
         );
       });
     }
+	if (snap && snap.monthly_error) diagnostics.appendChild(el("p", "error", "月度接口: " + snap.monthly_error));
+	if (snap && snap.weekly_error) diagnostics.appendChild(el("p", "error", "周额度接口: " + snap.weekly_error));
+	wrap.appendChild(diagnostics);
 
-    if (u.limit === 0 && u.used === 0 && u.weekPct === 0) {
+    if (!build.reported) {
       wrap.appendChild(
-        el("p", "error", "未解析到有效额度。请点「刷新」；若仍为空，检查账号是否有 Build 订阅。")
+        el("p", "muted", "Grok Build 共享周额度：未报告。月度/API 数据仍可在诊断区查看。")
       );
-    } else if (u.weekPct >= 100) {
+    } else if (num(build.shared_weekly_usage_percent) >= 100) {
       wrap.appendChild(
         el("p", "error", "周额度已用尽（上游可能返回 402 账单错误）。")
       );
-    } else if (u.monthPct >= 95) {
+    } else if (u.monthPct != null && u.monthPct >= 95) {
       wrap.appendChild(el("p", "error", "月额度即将用尽，请留意切换账号。"));
     }
 
@@ -650,6 +779,12 @@
   function num(v) {
     var n = Number(v);
     return isFinite(n) ? n : 0;
+  }
+
+  function optionalNum(v) {
+    if (v == null || v === "") return null;
+    var n = Number(v);
+    return isFinite(n) ? n : null;
   }
 
   function fmtNum(n) {
@@ -746,12 +881,42 @@
       el(
         "p",
         "muted",
-        "粘贴 grok auth JSON。将作为 {\"raw\": <JSON>} 提交到 import-grok。"
+        "上传多个 Grok / CPA JSON 或 SSO 文件，也可直接粘贴内容。原始文本会直接发送，重复 JSON 顶层名称不会在浏览器中被覆盖。"
       )
     );
+    var formatField = el("label", "field");
+    formatField.appendChild(el("span", "label", "内容类型"));
+    var format = el("select");
+    [
+      ["auto", "自动识别"],
+      ["json", "Grok / CPA JSON"],
+      ["sso", "SSO 文本 / JSON"],
+    ].forEach(function (option) {
+      var node = el("option", "", option[1]);
+      node.value = option[0];
+      format.appendChild(node);
+    });
+    formatField.appendChild(format);
+    body.appendChild(formatField);
+
+    var fileField = el("label", "field");
+    fileField.appendChild(el("span", "label", "选择文件（可多选）"));
+    var fileInput = el("input");
+    fileInput.type = "file";
+    fileInput.multiple = true;
+    fileInput.accept = ".json,.txt,.sso,application/json,text/plain";
+    fileField.appendChild(fileInput);
+    body.appendChild(fileField);
+
+    body.appendChild(el("div", "muted", "或粘贴内容"));
     var ta = el("textarea");
-    ta.placeholder = '{"accounts": ...} 或 auth.json 全文';
+    ta.placeholder = "auth.json / CPA xAI JSON / 每行一个 SSO";
     body.appendChild(ta);
+    var status = el("div", "muted");
+    body.appendChild(status);
+    var importDetails = el("pre", "code");
+    importDetails.style.display = "none";
+    body.appendChild(importDetails);
 
     var cancel = el("button", "btn", "取消");
     cancel.type = "button";
@@ -761,35 +926,113 @@
     ok.type = "button";
     ok.addEventListener("click", function () {
       var rawText = (ta.value || "").trim();
-      if (!rawText) {
-        toast("请粘贴 JSON", "err");
-        return;
-      }
-      var parsed;
-      try {
-        parsed = JSON.parse(rawText);
-      } catch (e) {
-        toast("JSON 无效: " + e.message, "err");
+      var selected = fileInput.files || [];
+      if (!rawText && !selected.length) {
+        toast("请选择文件或粘贴内容", "err");
         return;
       }
       ok.disabled = true;
-      // Align with handlers.ImportGrok body.Raw json.RawMessage via {"raw": object}
-      api("POST", "/admin/credentials/import-grok", { raw: parsed })
-        .then(function (data) {
-          var n = (data && data.imported) || 0;
-          toast("已导入 " + n + " 条凭证", "ok");
-          closeModal();
+      setText(status, "正在创建导入任务…");
+      var request;
+      if (selected.length) {
+        var form = new FormData();
+        form.append("format", format.value || "auto");
+        for (var i = 0; i < selected.length; i++) form.append("files", selected[i], selected[i].name);
+        if (rawText) {
+          form.append("files", new Blob([rawText], { type: "text/plain" }), "pasted.txt");
+        }
+        request = apiForm("POST", "/admin/import-jobs", form);
+      } else {
+        request = api("POST", "/admin/import-jobs", {
+          name: format.value === "json" ? "pasted.json" : "pasted.txt",
+          format: format.value || "auto",
+          text: rawText,
+        });
+      }
+      request
+        .then(function (job) {
+          setText(status, "任务已创建，正在解析与写入…");
+          return pollImportJob(job.id, status, importDetails);
+        })
+        .then(function (job) {
+          var imported = num(job.created) + num(job.updated);
+          var message =
+            "导入完成：" + imported + " 条（新增 " + num(job.created) + "，更新 " + num(job.updated) +
+            "，跳过 " + num(job.skipped) + "）";
+          if (job.failed) message += "，失败 " + job.failed;
+          if (job.warning_count) message += "，警告 " + job.warning_count;
+          toast(message, job.failed ? "err" : "ok");
+          ta.value = "";
+          fileInput.value = "";
           loadCredentials();
         })
         .catch(function (err) {
           toast("导入失败: " + err.message, "err");
+          setText(status, "导入失败: " + err.message);
         })
         .finally(function () {
           ok.disabled = false;
         });
     });
 
-    openModal("导入 Grok JSON", body, [cancel, ok]);
+    openModal("批量导入凭证", body, [cancel, ok]);
+  }
+
+  function pollImportJob(id, statusNode, detailsNode) {
+    return new Promise(function (resolve, reject) {
+      function poll() {
+        api("GET", "/admin/import-jobs/" + encodeURIComponent(id))
+          .then(function (job) {
+            setText(
+              statusNode,
+              "状态：" + (job.status || "unknown") +
+                " · 文件 " + num(job.files_processed) + "/" + num(job.files_total) +
+                " · 条目 " + num(job.processed) + "/" + num(job.total) +
+                " · 新增 " + num(job.created) +
+                " · 更新 " + num(job.updated) +
+                " · 跳过 " + num(job.skipped) +
+                " · 失败 " + num(job.failed)
+            );
+            renderImportJobDetails(job, detailsNode);
+            if (job.status === "completed" || job.status === "partial" || job.status === "failed") {
+              if (job.status === "failed" && !job.created && !job.updated) {
+                var detail = job.error || ((job.results || [])[0] || {}).error || "导入任务失败";
+                reject(new Error(detail));
+                return;
+              }
+              resolve(job);
+              return;
+            }
+            setTimeout(poll, 500);
+          })
+          .catch(reject);
+      }
+      poll();
+    });
+  }
+
+  function renderImportJobDetails(job, node) {
+    if (!node) return;
+    var lines = [];
+    (job.files || []).forEach(function (file) {
+      lines.push(
+        (file.source || "file") + " · " + (file.name || "未命名") + " · " + (file.status || "unknown") +
+          " · " + num(file.processed) + "/" + num(file.total)
+      );
+      (file.warnings || []).forEach(function (warning) {
+        lines.push("  警告 [" + (warning.field || "unknown") + "] " + (warning.message || ""));
+      });
+      (file.results || []).forEach(function (result) {
+        var line = "  " + (result.source || "entry") + " · " + (result.status || "unknown");
+        if (result.error) line += " · " + result.error;
+        lines.push(line);
+        (result.warnings || []).forEach(function (warning) {
+          lines.push("    警告 [" + (warning.field || "unknown") + "] " + (warning.message || ""));
+        });
+      });
+    });
+    node.style.display = lines.length ? "block" : "none";
+    setText(node, lines.join("\n"));
   }
 
   // ---------- Clients ----------
@@ -938,6 +1181,239 @@
     close.type = "button";
     close.addEventListener("click", closeModal);
     openModal("客户端密钥", body, [copy, close]);
+  }
+
+  // ---------- Runtime settings ----------
+
+  function loadSettings() {
+    var host = $("settings-body");
+    if (!host) return;
+    clear(host);
+    host.appendChild(el("p", "muted", "加载运行设置…"));
+    api("GET", "/admin/settings")
+      .then(function (settings) {
+        state.settings = settings;
+        clear(host);
+        host.appendChild(renderSettings(settings || {}));
+      })
+      .catch(function (err) {
+        clear(host);
+        host.appendChild(el("p", "error", "设置加载失败: " + err.message));
+      });
+  }
+
+  function renderSettings(settings) {
+    var wrap = el("div", "stack");
+    var globalProxy = settings.global_proxy || {};
+    var converter = settings.sso_converter || {};
+    var inspection = settings.inspection || {};
+
+    wrap.appendChild(el("h3", "", "全局出站代理"));
+    var proxyMode = settingSelect(
+      "代理模式",
+      [
+        ["environment", "读取 HTTP(S)_PROXY 环境变量"],
+        ["direct", "强制直连"],
+        ["url", "固定代理 URL"],
+      ],
+      globalProxy.mode || "environment"
+    );
+    wrap.appendChild(proxyMode.field);
+    if (globalProxy.url) wrap.appendChild(el("p", "muted", "当前：" + globalProxy.url));
+    var proxyURL = settingInput(
+      "新代理 URL",
+      "password",
+      "http://user:pass@host:port 或 socks5h://host:port"
+    );
+    wrap.appendChild(proxyURL.field);
+
+    wrap.appendChild(el("h3", "", "SSO 转换服务"));
+    var converterEnabled = settingCheckbox("启用 SSO 文件转换", !!converter.enabled);
+    var converterEndpoint = settingInput("服务端点", "url", "https://converter.example");
+    converterEndpoint.input.value = converter.endpoint || "";
+    var converterKey = settingInput("API Key（留空保持不变）", "password", "转换服务 API Key");
+    var converterClear = settingCheckbox("清除已保存的 API Key", false);
+    var converterInsecure = settingCheckbox(
+      "允许明文 HTTP（仅可信容器网络）",
+      !!converter.allow_insecure_http
+    );
+    var converterTimeout = settingInput("转换超时（秒）", "number");
+    converterTimeout.input.value = converter.timeout_sec || 600;
+    var converterBatch = settingInput("单批最大 SSO 数", "number");
+    converterBatch.input.value = converter.max_batch || 50;
+    [
+      converterEnabled,
+      converterEndpoint,
+      converterKey,
+      converterClear,
+      converterInsecure,
+      converterTimeout,
+      converterBatch,
+    ].forEach(function (item) {
+      wrap.appendChild(item.field);
+    });
+    wrap.appendChild(
+      el(
+        "p",
+        "muted",
+        converter.api_key_configured ? "API Key 已配置（不会回显）" : "尚未配置 API Key"
+      )
+    );
+
+    wrap.appendChild(el("h3", "", "凭证自动巡检"));
+    var inspectEnabled = settingCheckbox("启用定时巡检", !!inspection.enabled);
+    var inspectInterval = settingInput("巡检间隔（秒）", "number");
+    inspectInterval.input.value = inspection.interval_sec || 3600;
+    var inspectTimeout = settingInput("单账号超时（秒）", "number");
+    inspectTimeout.input.value = inspection.timeout_sec || 30;
+    var inspectConcurrency = settingInput("并发数", "number");
+    inspectConcurrency.input.value = inspection.concurrency || 2;
+    var inspectConfirm = settingInput("连续 401 确认次数", "number");
+    inspectConfirm.input.value = inspection.confirm_unauthorized || 2;
+    var inspectPurge = settingInput("隔离后自动删除（秒，0 表示不删除）", "number");
+    inspectPurge.input.value = inspection.purge_after_sec || 0;
+    [
+      inspectEnabled,
+      inspectInterval,
+      inspectTimeout,
+      inspectConcurrency,
+      inspectConfirm,
+      inspectPurge,
+    ].forEach(function (item) {
+      wrap.appendChild(item.field);
+    });
+    wrap.appendChild(el("p", "muted", "401 经刷新复核后隔离；429 只进入冷却，不会被判定为失效。"));
+    var inspectionStatus = el("p", "muted", "巡检状态加载中…");
+    wrap.appendChild(inspectionStatus);
+    api("GET", "/admin/inspection")
+      .then(function (data) {
+        if (data.running) {
+          setText(inspectionStatus, "巡检正在运行");
+        } else if (data.has_run && data.last) {
+          setText(
+            inspectionStatus,
+            "上次巡检：" + fmtTime(data.last.finished_at) +
+              " · 正常 " + num(data.last.healthy) +
+              " · 隔离 " + num(data.last.quarantined) +
+              " · 429 " + num(data.last.rate_limited)
+          );
+        } else {
+          setText(inspectionStatus, "尚未执行巡检");
+        }
+      })
+      .catch(function () {
+        setText(inspectionStatus, "巡检状态不可用");
+      });
+    var runInspection = el("button", "btn", "立即巡检");
+    runInspection.type = "button";
+    runInspection.addEventListener("click", function () {
+      runInspection.disabled = true;
+      setText(inspectionStatus, "正在巡检，请稍候…");
+      api("POST", "/admin/inspection/run")
+        .then(function (summary) {
+          setText(
+            inspectionStatus,
+            "巡检完成：正常 " + num(summary.healthy) +
+              " · 隔离 " + num(summary.quarantined) +
+              " · 429 " + num(summary.rate_limited) +
+              (summary.mass_failure_guard ? " · 已触发批量故障保护" : "")
+          );
+          loadCredentials();
+        })
+        .catch(function (err) {
+          setText(inspectionStatus, "巡检失败: " + err.message);
+        })
+        .finally(function () {
+          runInspection.disabled = false;
+        });
+    });
+    wrap.appendChild(runInspection);
+
+    var save = el("button", "btn btn-primary", "保存运行设置");
+    save.type = "button";
+    save.addEventListener("click", function () {
+      var payload = {};
+      var nextMode = proxyMode.input.value;
+      var nextURL = (proxyURL.input.value || "").trim();
+      if (nextMode !== (globalProxy.mode || "environment") || nextURL) {
+        if (nextMode === "url" && !nextURL) {
+          toast("切换固定代理时必须输入完整代理 URL", "err");
+          return;
+        }
+        payload.global_proxy = { mode: nextMode, url: nextURL };
+      }
+      payload.sso_converter = {
+        enabled: converterEnabled.input.checked,
+        allow_insecure_http: converterInsecure.input.checked,
+        timeout_sec: parseInt(converterTimeout.input.value, 10),
+        max_batch: parseInt(converterBatch.input.value, 10),
+        clear_api_key: converterClear.input.checked,
+      };
+      if ((converterEndpoint.input.value || "").trim()) {
+        payload.sso_converter.endpoint = converterEndpoint.input.value.trim();
+      }
+      if ((converterKey.input.value || "").trim()) {
+        payload.sso_converter.api_key = converterKey.input.value.trim();
+      }
+      payload.inspection = Object.assign({}, inspection, {
+        enabled: inspectEnabled.input.checked,
+        interval_sec: parseInt(inspectInterval.input.value, 10),
+        timeout_sec: parseInt(inspectTimeout.input.value, 10),
+        concurrency: parseInt(inspectConcurrency.input.value, 10),
+        confirm_unauthorized: parseInt(inspectConfirm.input.value, 10),
+        purge_after_sec: parseInt(inspectPurge.input.value, 10),
+      });
+      save.disabled = true;
+      api("PUT", "/admin/settings", payload)
+        .then(function () {
+          proxyURL.input.value = "";
+          converterKey.input.value = "";
+          toast("运行设置已保存", "ok");
+          loadSettings();
+        })
+        .catch(function (err) {
+          toast("设置保存失败: " + err.message, "err");
+        })
+        .finally(function () {
+          save.disabled = false;
+        });
+    });
+    wrap.appendChild(save);
+    return wrap;
+  }
+
+  function settingInput(label, type, placeholder) {
+    var field = el("label", "field");
+    field.appendChild(el("span", "label", label));
+    var input = el("input");
+    input.type = type || "text";
+    if (placeholder) input.placeholder = placeholder;
+    field.appendChild(input);
+    return { field: field, input: input };
+  }
+
+  function settingCheckbox(label, checked) {
+    var field = el("label", "row gap");
+    var input = el("input");
+    input.type = "checkbox";
+    input.checked = checked;
+    field.appendChild(input);
+    field.appendChild(el("span", "", label));
+    return { field: field, input: input };
+  }
+
+  function settingSelect(label, options, selected) {
+    var field = el("label", "field");
+    field.appendChild(el("span", "label", label));
+    var input = el("select");
+    options.forEach(function (value) {
+      var option = el("option", "", value[1]);
+      option.value = value[0];
+      option.selected = value[0] === selected;
+      input.appendChild(option);
+    });
+    field.appendChild(input);
+    return { field: field, input: input };
   }
 
   // ---------- System ----------
@@ -1101,6 +1577,9 @@
     var sysRefresh = $("btn-system-refresh");
     if (sysRefresh) sysRefresh.addEventListener("click", loadSystem);
 
+    var settingsRefresh = $("btn-settings-refresh");
+    if (settingsRefresh) settingsRefresh.addEventListener("click", loadSettings);
+
     var copyInt = $("btn-copy-integration");
     if (copyInt) copyInt.addEventListener("click", copyIntegration);
 
@@ -1119,7 +1598,9 @@
 
   function boot() {
     bind();
-    state.key = loadKey();
+    // Keep the admin key only in this page's JavaScript memory. Reloading the
+    // page intentionally requires re-authentication.
+    state.key = "";
     if (state.key) {
       api("GET", "/admin/system")
         .then(function (sys) {

@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/admin"
@@ -42,6 +44,9 @@ type Options struct {
 	Version string
 	Logger  *slog.Logger
 	Metrics *Metrics
+	// ReadinessCacheTTL bounds how often unauthenticated /readyz may touch the
+	// JSON credential store. Zero uses one second.
+	ReadinessCacheTTL time.Duration
 }
 
 // clientAuth implements ClientAuthenticator.
@@ -80,6 +85,7 @@ func New(opts Options) http.Handler {
 	}
 
 	mux := http.NewServeMux()
+	readiness := &readinessCache{store: opts.Store, ttl: opts.ReadinessCacheTTL}
 
 	// Unauthenticated health / probe.
 	// Register without method-specific catch-all patterns that conflict in Go 1.22+.
@@ -95,7 +101,7 @@ func New(opts Options) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		handleReadyz(w, r, opts.Store)
+		handleReadyz(w, r, readiness)
 	})
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +151,45 @@ func New(opts Options) http.Handler {
 		mux.Handle("/admin/", opts.Admin.Handler())
 	}
 
-	return mw.Observe(mw.Timeout(mux))
+	return requireTrustedAdminHost(mw.Observe(mw.Timeout(mux)), opts.Config)
+}
+
+func requireTrustedAdminHost(next http.Handler, cfg config.Config) http.Handler {
+	trusted := make(map[string]struct{}, len(cfg.AdminTrustedHosts)+4)
+	trusted["localhost"] = struct{}{}
+	for _, raw := range cfg.AdminTrustedHosts {
+		if host, err := config.NormalizeTrustedHost(raw); err == nil {
+			trusted[host] = struct{}{}
+		}
+	}
+	if listenHost, _, err := net.SplitHostPort(strings.TrimSpace(cfg.Listen)); err == nil {
+		listenHost = strings.Trim(listenHost, "[]")
+		if listenHost != "" && listenHost != "0.0.0.0" && listenHost != "::" {
+			if host, normalizeErr := config.NormalizeTrustedHost(listenHost); normalizeErr == nil {
+				trusted[host] = struct{}{}
+			}
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/admin" && !strings.HasPrefix(r.URL.Path, "/admin/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		host, err := config.NormalizeTrustedHost(r.Host)
+		if err != nil {
+			http.Error(w, "misdirected admin request", http.StatusMisdirectedRequest)
+			return
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if _, ok := trusted[host]; !ok {
+			http.Error(w, "misdirected admin request", http.StatusMisdirectedRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // NewServer builds an *http.Server with sensible timeouts.
@@ -168,18 +212,49 @@ type credentialReader interface {
 	ListCredentials() ([]storage.Credential, error)
 }
 
-func handleReadyz(w http.ResponseWriter, r *http.Request, store ClientStore) {
+type readinessSnapshot struct {
+	status    int
+	ready     bool
+	reason    string
+	available int
+}
+
+type readinessCache struct {
+	mu      sync.Mutex
+	store   ClientStore
+	ttl     time.Duration
+	expires time.Time
+	value   readinessSnapshot
+}
+
+func (c *readinessCache) current() readinessSnapshot {
+	if c == nil {
+		return readinessSnapshot{status: http.StatusServiceUnavailable, reason: "credential store unavailable"}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	if !c.expires.IsZero() && now.Before(c.expires) {
+		return c.value
+	}
+	ttl := c.ttl
+	if ttl <= 0 {
+		ttl = time.Second
+	}
+	c.value = computeReadiness(c.store, now)
+	c.expires = now.Add(ttl)
+	return c.value
+}
+
+func computeReadiness(store ClientStore, now time.Time) readinessSnapshot {
 	reader, ok := store.(credentialReader)
 	if !ok {
-		writeReadiness(w, r, http.StatusServiceUnavailable, false, "credential store unavailable", 0)
-		return
+		return readinessSnapshot{status: http.StatusServiceUnavailable, reason: "credential store unavailable"}
 	}
 	creds, err := reader.ListCredentials()
 	if err != nil {
-		writeReadiness(w, r, http.StatusServiceUnavailable, false, "credential store unreadable", 0)
-		return
+		return readinessSnapshot{status: http.StatusServiceUnavailable, reason: "credential store unreadable"}
 	}
-	now := time.Now()
 	available := 0
 	for _, credential := range creds {
 		if !credential.Enabled {
@@ -198,10 +273,14 @@ func handleReadyz(w http.ResponseWriter, r *http.Request, store ClientStore) {
 		available++
 	}
 	if available == 0 {
-		writeReadiness(w, r, http.StatusServiceUnavailable, false, "no usable credentials", 0)
-		return
+		return readinessSnapshot{status: http.StatusServiceUnavailable, reason: "no usable credentials"}
 	}
-	writeReadiness(w, r, http.StatusOK, true, "ready", available)
+	return readinessSnapshot{status: http.StatusOK, ready: true, reason: "ready", available: available}
+}
+
+func handleReadyz(w http.ResponseWriter, r *http.Request, cache *readinessCache) {
+	snapshot := cache.current()
+	writeReadiness(w, r, snapshot.status, snapshot.ready, snapshot.reason, snapshot.available)
 }
 
 func writeReadiness(w http.ResponseWriter, r *http.Request, status int, ready bool, reason string, available int) {
