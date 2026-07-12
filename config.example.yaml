@@ -66,6 +66,9 @@ request_patch:
         tools.-1: '{"type":"web_search"}'
 # 默认出站路由。Admin 运行时设置会覆盖这里的值。
 # mode: environment | direct | url
+notifications:
+  # Optional Feishu custom-bot webhook. Keep the real URL in private config.yaml.
+  feishu_webhook_url: ""
 proxy:
   mode: environment
   url: ""

@@ -184,6 +184,14 @@ required. When enabled, cleanup occurs only after the retention deadline, an
 unchanged token fingerprint, and another confirmed terminal-auth failure.
 Always back up `data_dir` before enabling cleanup.
 
+## Feishu notifications
+
+Set `notifications.feishu_webhook_url` to a Feishu custom-bot webhook URL to
+receive a compact summary after every scheduled or manually started inspection.
+Webhook delivery is bounded and failures are logged without changing the
+inspection result. Treat the URL as a secret and keep it only in private
+`config.yaml`, never in source control.
+
 ## Billing interpretation
 
 The primary Admin card is Grok Build's shared weekly usage. Product-level

@@ -36,6 +36,10 @@ type SettingsProvider interface {
 	Current() storage.RuntimeSettings
 }
 
+type Notifier interface {
+	NotifyInspection(ctx context.Context, summary Summary) error
+}
+
 type revisionedSettingsProvider interface {
 	SettingsProvider
 	Revision() uint64
@@ -86,6 +90,7 @@ type Runner struct {
 	Logger            *slog.Logger
 	RateLimitCooldown time.Duration
 	QuotaCooldown     time.Duration
+	Notifier          Notifier
 	// InvalidateCredential retires any in-process refresh flight/cache before
 	// and after automatic deletion. It is intentionally optional for tests and
 	// alternative stores.
@@ -490,7 +495,19 @@ func (r *Runner) runOnce(ctx context.Context) (Summary, error) {
 	snapshot.Results = append([]Result(nil), summary.Results...)
 	r.last = &snapshot
 	r.mu.Unlock()
+	r.notify(summary)
 	return summary, nil
+}
+
+func (r *Runner) notify(summary Summary) {
+	if r == nil || r.Notifier == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := r.Notifier.NotifyInspection(ctx, summary); err != nil && r.Logger != nil {
+		r.Logger.Warn("credential_inspection_notification_failed", "error", err)
+	}
 }
 
 func (r *Runner) Last() (Summary, bool) {

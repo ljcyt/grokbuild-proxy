@@ -51,6 +51,7 @@ type Config struct {
 	Inspection        InspectionConfig   `yaml:"inspection"`
 	Import            ImportConfig       `yaml:"import"`
 	RequestPatch      RequestPatchConfig `yaml:"request_patch"`
+	Notifications     NotificationConfig `yaml:"notifications"`
 	Limits            LimitsConfig       `yaml:"limits"`
 	Logging           LoggingConfig      `yaml:"logging"`
 }
@@ -117,6 +118,11 @@ type RequestPatchRule struct {
 	Name   string            `yaml:"name"`
 	Models []string          `yaml:"models"`
 	Set    map[string]string `yaml:"set"`
+}
+
+// NotificationConfig controls optional operator notifications.
+type NotificationConfig struct {
+	FeishuWebhookURL string `yaml:"feishu_webhook_url"`
 }
 
 // ProxyConfig controls the default outbound route. Runtime Admin settings can override it.
@@ -371,6 +377,9 @@ func (c Config) Validate() error {
 	if err := c.RequestPatch.Validate(); err != nil {
 		return err
 	}
+	if err := validateFeishuWebhookURL(c.Notifications.FeishuWebhookURL); err != nil {
+		return err
+	}
 	switch strings.ToLower(strings.TrimSpace(c.Proxy.Mode)) {
 	case "environment", "direct", "url":
 	default:
@@ -449,6 +458,20 @@ func (c Config) Validate() error {
 		}
 	}
 	return c.ValidateListen(c.Listen)
+}
+
+func validateFeishuWebhookURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+		!strings.EqualFold(u.Hostname(), "open.feishu.cn") || u.Port() != "" ||
+		!strings.HasPrefix(u.EscapedPath(), "/open-apis/bot/v2/hook/") {
+		return fmt.Errorf("notifications.feishu_webhook_url must be an https://open.feishu.cn/open-apis/bot/v2/hook/... URL")
+	}
+	return nil
 }
 
 // RequestTimeout returns the configured HTTP request timeout as a duration.

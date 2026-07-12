@@ -21,6 +21,7 @@ import (
 	"github.com/GreyGunG/grokbuild-proxy/internal/importer"
 	"github.com/GreyGunG/grokbuild-proxy/internal/inspection"
 	"github.com/GreyGunG/grokbuild-proxy/internal/lb"
+	"github.com/GreyGunG/grokbuild-proxy/internal/notify"
 	"github.com/GreyGunG/grokbuild-proxy/internal/openai"
 	"github.com/GreyGunG/grokbuild-proxy/internal/outbound"
 	"github.com/GreyGunG/grokbuild-proxy/internal/proxy"
@@ -187,6 +188,7 @@ func main() {
 		Logger:               logger,
 		RateLimitCooldown:    time.Duration(cfg.LB.Cooldown.BaseSec) * time.Second,
 		QuotaCooldown:        time.Duration(cfg.LB.QuotaCooldownSec) * time.Second,
+		Notifier:             notify.NewFeishuWebhookNotifier(cfg.Notifications.FeishuWebhookURL, globalUpstreamHTTP),
 		InvalidateCredential: refresher.Invalidate,
 	}
 	inspectionCtx, stopInspection := context.WithCancel(context.Background())

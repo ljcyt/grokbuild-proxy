@@ -26,6 +26,18 @@ func TestRejectsNonFiniteMassFailureRatio(t *testing.T) {
 	}
 }
 
+func TestValidateFeishuWebhookURL(t *testing.T) {
+	cfg := Default()
+	cfg.Notifications.FeishuWebhookURL = "https://open.feishu.cn/open-apis/bot/v2/hook/test-id"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid webhook rejected: %v", err)
+	}
+	cfg.Notifications.FeishuWebhookURL = "https://example.test/open-apis/bot/v2/hook/test-id"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("non-Feishu webhook accepted")
+	}
+}
+
 func TestDefaultAlignedWithPlan(t *testing.T) {
 	cfg := Default()
 
