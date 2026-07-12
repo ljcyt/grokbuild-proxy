@@ -1313,6 +1313,7 @@
     var wrap = el("div", "stack");
     var globalProxy = settings.global_proxy || {};
     var converter = settings.sso_converter || {};
+    var notifications = settings.notifications || {};
     var inspection = settings.inspection || {};
 
     wrap.appendChild(el("h3", "", "全局出站代理"));
@@ -1366,6 +1367,13 @@
         converter.api_key_configured ? "API Key 已配置（不会回显）" : "尚未配置 API Key"
       )
     );
+
+    wrap.appendChild(el("h3", "", "飞书通知"));
+    var feishuWebhook = settingInput("Webhook 地址（留空保持不变）", "password", "https://open.feishu.cn/open-apis/bot/v2/hook/...");
+    var clearFeishuWebhook = settingCheckbox("清除已保存的 Webhook", false);
+    wrap.appendChild(feishuWebhook.field);
+    wrap.appendChild(clearFeishuWebhook.field);
+    wrap.appendChild(el("p", "muted", notifications.feishu_webhook_configured ? "Webhook 已配置（不会回显）；巡检完成后自动通知。" : "未配置飞书 Webhook。"));
 
     wrap.appendChild(el("h3", "", "凭证自动巡检"));
     var inspectEnabled = settingCheckbox("启用定时巡检", !!inspection.enabled);
@@ -1489,6 +1497,10 @@
       }
       if ((converterKey.input.value || "").trim()) {
         payload.sso_converter.api_key = converterKey.input.value.trim();
+      }
+      payload.notifications = { clear_feishu_webhook: clearFeishuWebhook.input.checked };
+      if ((feishuWebhook.input.value || "").trim()) {
+        payload.notifications.feishu_webhook_url = feishuWebhook.input.value.trim();
       }
       payload.inspection = Object.assign({}, inspection, {
         enabled: inspectEnabled.input.checked,

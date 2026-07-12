@@ -188,7 +188,7 @@ func main() {
 		Logger:               logger,
 		RateLimitCooldown:    time.Duration(cfg.LB.Cooldown.BaseSec) * time.Second,
 		QuotaCooldown:        time.Duration(cfg.LB.QuotaCooldownSec) * time.Second,
-		Notifier:             notify.NewFeishuWebhookNotifier(cfg.Notifications.FeishuWebhookURL, globalUpstreamHTTP),
+		Notifier:             notify.RuntimeFeishuNotifier{Settings: settingsManager, Client: globalUpstreamHTTP},
 		InvalidateCredential: refresher.Invalidate,
 	}
 	inspectionCtx, stopInspection := context.WithCancel(context.Background())
@@ -347,6 +347,7 @@ func envTrue(name string) bool {
 
 func runtimeDefaults(cfg config.Config) storage.RuntimeSettings {
 	settings := storage.DefaultRuntimeSettings()
+	settings.Notifications.FeishuWebhookURL = cfg.Notifications.FeishuWebhookURL
 	settings.GlobalProxy = storage.GlobalProxySettings{
 		Mode: cfg.Proxy.Mode,
 		URL:  cfg.Proxy.URL,

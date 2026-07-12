@@ -11,7 +11,24 @@ import (
 	"time"
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/inspection"
+	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 )
+
+type SettingsProvider interface {
+	Current() storage.RuntimeSettings
+}
+
+type RuntimeFeishuNotifier struct {
+	Settings SettingsProvider
+	Client   *http.Client
+}
+
+func (n RuntimeFeishuNotifier) NotifyInspection(ctx context.Context, summary inspection.Summary) error {
+	if n.Settings == nil {
+		return nil
+	}
+	return NewFeishuWebhookNotifier(n.Settings.Current().Notifications.FeishuWebhookURL, n.Client).NotifyInspection(ctx, summary)
+}
 
 type FeishuWebhookNotifier struct {
 	webhookURL string

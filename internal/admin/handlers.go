@@ -953,6 +953,10 @@ func (h *Handlers) UpdateRuntimeSettings(w http.ResponseWriter, r *http.Request)
 			TimeoutSec    *int    `json:"timeout_sec"`
 			MaxBatch      *int    `json:"max_batch"`
 		} `json:"sso_converter"`
+		Notifications *struct {
+			FeishuWebhookURL   *string `json:"feishu_webhook_url"`
+			ClearFeishuWebhook bool    `json:"clear_feishu_webhook"`
+		} `json:"notifications"`
 		Inspection *storage.InspectionSettings `json:"inspection"`
 	}
 	if err := decodeJSON(r, h.maxBody(), &body); err != nil {
@@ -1016,6 +1020,13 @@ func (h *Handlers) UpdateRuntimeSettings(w http.ResponseWriter, r *http.Request)
 		}
 		if body.Inspection != nil {
 			settings.Inspection = *body.Inspection
+		}
+		if notifications := body.Notifications; notifications != nil {
+			if notifications.ClearFeishuWebhook {
+				settings.Notifications.FeishuWebhookURL = ""
+			} else if notifications.FeishuWebhookURL != nil && strings.TrimSpace(*notifications.FeishuWebhookURL) != "" {
+				settings.Notifications.FeishuWebhookURL = strings.TrimSpace(*notifications.FeishuWebhookURL)
+			}
 		}
 		return settings.Validate()
 	})
@@ -1221,6 +1232,9 @@ func (h *Handlers) maskRuntimeSettings(settings storage.RuntimeSettings) map[str
 			"max_batch":           settings.SSOConverter.MaxBatch,
 		},
 		"inspection": settings.Inspection,
+		"notifications": map[string]any{
+			"feishu_webhook_configured": strings.TrimSpace(settings.Notifications.FeishuWebhookURL) != "",
+		},
 	}
 }
 

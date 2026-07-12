@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -21,9 +22,10 @@ const (
 // RuntimeSettings are operator-managed overrides stored under data_dir.
 // Proxy URLs and converter keys may contain secrets; settings.json is mode 0600.
 type RuntimeSettings struct {
-	GlobalProxy  GlobalProxySettings  `json:"global_proxy"`
-	SSOConverter SSOConverterSettings `json:"sso_converter"`
-	Inspection   InspectionSettings   `json:"inspection"`
+	GlobalProxy   GlobalProxySettings  `json:"global_proxy"`
+	SSOConverter  SSOConverterSettings `json:"sso_converter"`
+	Inspection    InspectionSettings   `json:"inspection"`
+	Notifications NotificationSettings `json:"notifications"`
 }
 
 type GlobalProxySettings struct {
@@ -54,6 +56,10 @@ type InspectionSettings struct {
 	SkipRecentSuccessSec   int     `json:"skip_recent_success_sec,omitempty"`
 	MaxCredentialsPerRun   int     `json:"max_credentials_per_run,omitempty"`
 	MaxPersistedRunResults int     `json:"max_persisted_run_results,omitempty"`
+}
+
+type NotificationSettings struct {
+	FeishuWebhookURL string `json:"feishu_webhook_url,omitempty"`
 }
 
 func DefaultRuntimeSettings() RuntimeSettings {
@@ -135,6 +141,7 @@ func normalizeRuntimeSettings(value, fallback RuntimeSettings) RuntimeSettings {
 	out.GlobalProxy.URL = strings.TrimSpace(out.GlobalProxy.URL)
 	out.SSOConverter.Endpoint = strings.TrimRight(strings.TrimSpace(out.SSOConverter.Endpoint), "/")
 	out.SSOConverter.APIKey = strings.TrimSpace(out.SSOConverter.APIKey)
+	out.Notifications.FeishuWebhookURL = strings.TrimSpace(out.Notifications.FeishuWebhookURL)
 	if out.SSOConverter.TimeoutSec <= 0 {
 		out.SSOConverter.TimeoutSec = fallback.SSOConverter.TimeoutSec
 	}
@@ -187,6 +194,12 @@ func (s RuntimeSettings) Validate() error {
 	}
 	if s.SSOConverter.TimeoutSec <= 0 || s.SSOConverter.MaxBatch <= 0 {
 		return fmt.Errorf("settings: sso converter timeout_sec/max_batch must be > 0")
+	}
+	if raw := strings.TrimSpace(s.Notifications.FeishuWebhookURL); raw != "" {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "https" || !strings.EqualFold(u.Hostname(), "open.feishu.cn") || !strings.HasPrefix(u.EscapedPath(), "/open-apis/bot/v2/hook/") {
+			return fmt.Errorf("settings: feishu webhook URL is invalid")
+		}
 	}
 	if s.SSOConverter.TimeoutSec > MaxSSOConverterTimeoutSec {
 		return fmt.Errorf("settings: sso converter timeout_sec must be <= %d", MaxSSOConverterTimeoutSec)
