@@ -253,10 +253,10 @@ func Default() Config {
 			MaxCredentialsPerRun: 100,
 		},
 		Import: ImportConfig{
-			MaxFiles:         100,
+			MaxFiles:         2000,
 			MaxFileBytes:     4 * 1024 * 1024,
 			MaxTotalBytes:    16 * 1024 * 1024,
-			MaxEntries:       1000,
+			MaxEntries:       2000,
 			MaxQueuedJobs:    32,
 			MaxQueuedBytes:   64 * 1024 * 1024,
 			MaxRetainedJobs:  128,

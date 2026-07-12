@@ -150,7 +150,7 @@ func NewManager(store Store, converter Converter, limits Limits) (*Manager, erro
 		return nil, fmt.Errorf("importer: store is required")
 	}
 	if limits.MaxFiles <= 0 {
-		limits.MaxFiles = 100
+		limits.MaxFiles = 2000
 	}
 	if limits.MaxFileBytes <= 0 {
 		limits.MaxFileBytes = 4 << 20
@@ -159,7 +159,7 @@ func NewManager(store Store, converter Converter, limits Limits) (*Manager, erro
 		limits.MaxTotalBytes = 16 << 20
 	}
 	if limits.MaxEntries <= 0 {
-		limits.MaxEntries = 1000
+		limits.MaxEntries = 2000
 	}
 	if limits.MaxQueuedJobs <= 0 {
 		limits.MaxQueuedJobs = 32

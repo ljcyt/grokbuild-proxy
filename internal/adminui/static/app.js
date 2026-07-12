@@ -1005,10 +1005,12 @@
     body.appendChild(formatField);
 
     var fileField = el("label", "field");
-    fileField.appendChild(el("span", "label", "选择文件（可多选）"));
+    fileField.appendChild(el("span", "label", "选择文件或目录（可多选）"));
     var fileInput = el("input");
     fileInput.type = "file";
     fileInput.multiple = true;
+    fileInput.setAttribute("webkitdirectory", "");
+    fileInput.setAttribute("directory", "");
     fileInput.accept = ".json,.txt,.sso,application/json,text/plain";
     fileField.appendChild(fileInput);
     body.appendChild(fileField);

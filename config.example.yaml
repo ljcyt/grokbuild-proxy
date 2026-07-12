@@ -100,10 +100,10 @@ inspection:
   max_credentials_per_run: 100
 # 批量导入任务边界。
 import:
-  max_files: 100
+  max_files: 2000
   max_file_bytes: 4194304
   max_total_bytes: 16777216
-  max_entries: 1000
+  max_entries: 2000
   max_queued_jobs: 32
   max_queued_bytes: 67108864
   max_retained_jobs: 128
