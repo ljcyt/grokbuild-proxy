@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -16,10 +17,19 @@ import (
 	"github.com/GreyGunG/grokbuild-proxy/internal/anthropic"
 	"github.com/GreyGunG/grokbuild-proxy/internal/config"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
+	"github.com/GreyGunG/grokbuild-proxy/internal/upstream"
 )
 
 type stubClientStore struct {
 	keys map[string]storage.ClientKey
+}
+
+type stubModelLister struct {
+	data []upstream.Model
+}
+
+func (s stubModelLister) ListModels(context.Context) (*upstream.ModelList, error) {
+	return &upstream.ModelList{Object: "list", Data: s.data}, nil
 }
 
 func (s stubClientStore) LookupClientByPlaintext(plaintext string) (storage.ClientKey, bool, error) {
@@ -122,6 +132,46 @@ func TestMiddlewareAcceptsAPIKey(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "object") {
 		t.Fatalf("body=%s", rr.Body.String())
+	}
+}
+
+func TestModelsOnlyAdvertisesConfiguredModelsAndUsableAliases(t *testing.T) {
+	cfg := config.Default()
+	h := New(Options{
+		Config: cfg,
+		Store: stubClientStore{keys: map[string]storage.ClientKey{
+			"sk-api-good": {ID: "client-test"},
+		}},
+		ModelList: stubModelLister{data: []upstream.Model{
+			{ID: "grok-4.5", OwnedBy: "xai"},
+			{ID: "grok-composer-2.5-fast", OwnedBy: "xai"},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-api-good")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[string]bool, len(response.Data))
+	for _, row := range response.Data {
+		ids[row.ID] = true
+	}
+	if !ids["grok-4.5"] || !ids["claude-sonnet-4"] || !ids["haiku"] {
+		t.Fatalf("missing supported models: %#v", ids)
+	}
+	if ids["grok-composer-2.5-fast"] {
+		t.Fatalf("unavailable composer must not be advertised: %#v", ids)
 	}
 }
 

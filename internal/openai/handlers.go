@@ -38,13 +38,15 @@ func (h *Handlers) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_body")
 		return
 	}
+	resolvedModel := h.resolve(res.Model)
+	res.Body["model"] = resolvedModel
 	sanitized, err := marshalBody(res.Body)
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, "failed to encode request", "server_error", "encode_error")
 		return
 	}
 
-	resp, err := h.Post(r.Context(), res.Model, res.ConvID, sanitized, res.Stream)
+	resp, err := h.Post(r.Context(), resolvedModel, res.ConvID, sanitized, res.Stream)
 	if err != nil {
 		writePostError(w, err)
 		return
@@ -96,14 +98,14 @@ func (h *Handlers) HandleChatCompletions(w http.ResponseWriter, r *http.Request)
 		WriteError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_body")
 		return
 	}
+	stream := sanitizedRes.Stream
+	model := h.resolve(sanitizedRes.Model)
+	sanitizedRes.Body["model"] = model
 	sanitized, err := marshalBody(sanitizedRes.Body)
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, "failed to encode request", "server_error", "encode_error")
 		return
 	}
-
-	stream := sanitizedRes.Stream
-	model := sanitizedRes.Model
 	convID := sanitizedRes.ConvID
 	if convID == "" {
 		convID = convHint

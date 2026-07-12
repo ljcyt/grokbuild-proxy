@@ -13,6 +13,9 @@ upstream:
   client_identifier: "grok-pager"
   user_agent: "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)"
   token_auth: "xai-grok-cli"
+  # Only publish models that the proxy deliberately routes. Add another real
+  # Grok model here only after confirming the account pool can use it.
+  visible_models: ["grok-4.5"]
 oauth:
   issuer: "https://auth.x.ai"
   client_id: "b1a00492-073a-47ea-816f-4c329264a828"
@@ -30,11 +33,11 @@ anthropic:
     claude-opus-4-6: grok-4.5
     claude-opus-4-7: grok-4.5
     claude-opus-4-8: grok-4.5
-    claude-haiku-4: grok-composer-2.5-fast
-    claude-haiku-4-5: grok-composer-2.5-fast
+    claude-haiku-4: grok-4.5
+    claude-haiku-4-5: grok-4.5
     sonnet: grok-4.5
     opus: grok-4.5
-    haiku: grok-composer-2.5-fast
+    haiku: grok-4.5
   passthrough_prefixes: ["grok-"]
   # Unknown beta extensions are dropped; recognized thinking/effort is mapped.
   strip_unknown_betas: true

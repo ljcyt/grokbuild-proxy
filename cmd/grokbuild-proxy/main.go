@@ -196,8 +196,9 @@ func main() {
 	go inspectionRunner.Run(inspectionCtx)
 
 	oai := &openai.Handlers{
-		Post:    exec.Post,
-		MaxBody: cfg.Limits.MaxBodyBytes,
+		Post:         exec.Post,
+		MaxBody:      cfg.Limits.MaxBodyBytes,
+		ResolveModel: cfg.ResolveModel,
 	}
 	anth := &anthropic.Handlers{
 		Post:    exec.Post,

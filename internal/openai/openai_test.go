@@ -517,6 +517,41 @@ func TestHandleResponses_NonStream(t *testing.T) {
 	}
 }
 
+func TestHandleResponses_ResolvesConfiguredAlias(t *testing.T) {
+	var posted map[string]any
+	h := &Handlers{
+		ResolveModel: func(model string) string {
+			if model == "claude-sonnet-4" {
+				return "grok-4.5"
+			}
+			return model
+		},
+		Post: func(_ context.Context, model, _ string, body []byte, _ bool) (*http.Response, error) {
+			if model != "grok-4.5" {
+				t.Fatalf("upstream model=%q", model)
+			}
+			if err := json.Unmarshal(body, &posted); err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"id":"resp_alias","model":"grok-4.5","output":[]}`)),
+			}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"claude-sonnet-4","input":"hello"}`))
+	rr := httptest.NewRecorder()
+	h.HandleResponses(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := asString(posted["model"]); got != "grok-4.5" {
+		t.Fatalf("body model=%q", got)
+	}
+}
+
 func TestHandleResponses_StreamFlush(t *testing.T) {
 	sse := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: [DONE]\n\n"
 	h := &Handlers{
@@ -632,6 +667,43 @@ func TestHandleChatCompletions_NonStream(t *testing.T) {
 	}
 	if v, _ := asInt64(posted["max_output_tokens"]); v != 10 {
 		t.Fatalf("max_output_tokens %v", posted["max_output_tokens"])
+	}
+}
+
+func TestHandleChatCompletions_ResolvesConfiguredAlias(t *testing.T) {
+	var posted map[string]any
+	h := &Handlers{
+		ResolveModel: func(model string) string {
+			if model == "haiku" {
+				return "grok-4.5"
+			}
+			return model
+		},
+		Post: func(_ context.Context, model, _ string, body []byte, _ bool) (*http.Response, error) {
+			if model != "grok-4.5" {
+				t.Fatalf("upstream model=%q", model)
+			}
+			if err := json.Unmarshal(body, &posted); err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{
+					"id":"resp_alias","model":"grok-4.5","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}`)),
+			}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"haiku","messages":[{"role":"user","content":"hello"}]}`))
+	rr := httptest.NewRecorder()
+	h.HandleChatCompletions(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := asString(posted["model"]); got != "grok-4.5" {
+		t.Fatalf("body model=%q", got)
 	}
 }
 

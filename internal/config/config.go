@@ -63,6 +63,10 @@ type UpstreamConfig struct {
 	ClientIdentifier string `yaml:"client_identifier"`
 	UserAgent        string `yaml:"user_agent"`
 	TokenAuth        string `yaml:"token_auth"`
+	// VisibleModels limits GET /v1/models to models deliberately exposed to
+	// clients. An empty list preserves the upstream model list for legacy
+	// configurations.
+	VisibleModels []string `yaml:"visible_models"`
 }
 
 // OAuthConfig holds OIDC / device-flow settings for xAI auth.
@@ -195,6 +199,7 @@ func Default() Config {
 			ClientIdentifier: "grok-pager",
 			UserAgent:        "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
 			TokenAuth:        "xai-grok-cli",
+			VisibleModels:    []string{"grok-4.5"},
 		},
 		OAuth: OAuthConfig{
 			Issuer:       "https://auth.x.ai",
@@ -214,11 +219,11 @@ func Default() Config {
 				"claude-opus-4-6":   "grok-4.5",
 				"claude-opus-4-7":   "grok-4.5",
 				"claude-opus-4-8":   "grok-4.5",
-				"claude-haiku-4":    "grok-composer-2.5-fast",
-				"claude-haiku-4-5":  "grok-composer-2.5-fast",
+				"claude-haiku-4":    "grok-4.5",
+				"claude-haiku-4-5":  "grok-4.5",
 				"sonnet":            "grok-4.5",
 				"opus":              "grok-4.5",
-				"haiku":             "grok-composer-2.5-fast",
+				"haiku":             "grok-4.5",
 			},
 			PassthroughPrefixes: []string{"grok-"},
 			StripUnknownBetas:   true,
@@ -608,6 +613,22 @@ func (c Config) RefreshSkew() time.Duration {
 // Unknown models are returned as-is (caller may still reject).
 func (c Config) ResolveModel(model string) string {
 	return c.Anthropic.ResolveModel(model)
+}
+
+// AdvertisesModel reports whether a real upstream model belongs in GET
+// /v1/models. Empty VisibleModels preserves the complete upstream listing for
+// existing configurations created before this option was introduced.
+func (c UpstreamConfig) AdvertisesModel(model string) bool {
+	if len(c.VisibleModels) == 0 {
+		return true
+	}
+	model = strings.TrimSpace(model)
+	for _, visible := range c.VisibleModels {
+		if model != "" && model == strings.TrimSpace(visible) {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveModel maps an Anthropic model id using explicit aliases only.

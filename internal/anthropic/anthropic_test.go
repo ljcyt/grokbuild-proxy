@@ -378,7 +378,7 @@ func TestModelAliasResolve(t *testing.T) {
 
 	// Handlers.resolve with nil ResolveModel uses Cfg
 	h := &Handlers{Cfg: cfg.Anthropic}
-	if got := h.resolve("claude-haiku-4"); got != "grok-composer-2.5-fast" {
+	if got := h.resolve("claude-haiku-4"); got != "grok-4.5" {
 		t.Fatalf("handler resolve=%q", got)
 	}
 	if got := h.resolve("claude-opus-4-99-20990101"); got != "claude-opus-4-99-20990101" {

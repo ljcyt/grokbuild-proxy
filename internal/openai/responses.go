@@ -28,8 +28,21 @@ const DefaultMaxBody int64 = 20 << 20
 type Handlers struct {
 	// Post performs the upstream Responses call. Required.
 	Post PostResponsesFunc
+	// ResolveModel maps a client-facing alias to an upstream Grok model. If nil,
+	// the requested model is sent unchanged.
+	ResolveModel func(string) string
 	// MaxBody limits request body size. Zero uses DefaultMaxBody.
 	MaxBody int64
+}
+
+func (h *Handlers) resolve(model string) string {
+	model = strings.TrimSpace(model)
+	if h != nil && h.ResolveModel != nil {
+		if resolved := strings.TrimSpace(h.ResolveModel(model)); resolved != "" {
+			return resolved
+		}
+	}
+	return model
 }
 
 func (h *Handlers) maxBody() int64 {

@@ -355,8 +355,11 @@ func handleModels(w http.ResponseWriter, r *http.Request, opts Options) {
 	var upstreamModels []upstream.Model
 	if opts.ModelList != nil {
 		if list, err := opts.ModelList.ListModels(r.Context()); err == nil && list != nil {
-			upstreamModels = list.Data
 			for _, m := range list.Data {
+				if !opts.Config.Upstream.AdvertisesModel(m.ID) {
+					continue
+				}
+				upstreamModels = append(upstreamModels, m)
 				add(m.ID, firstNonEmpty(m.OwnedBy, "xai"), m.Created, firstNonEmpty(m.Name, m.ID))
 			}
 		}
@@ -371,6 +374,9 @@ func handleModels(w http.ResponseWriter, r *http.Request, opts Options) {
 
 	// Always expose configured alias targets / short names as discovery aids.
 	for alias, target := range opts.Config.Anthropic.ModelAliases {
+		if !opts.Config.Upstream.AdvertisesModel(target) {
+			continue
+		}
 		add(alias, "anthropic", 0, alias)
 		add(target, "xai", 0, target)
 	}

@@ -86,16 +86,19 @@ func TestDefaultAlignedWithPlan(t *testing.T) {
 		"claude-opus-4-6":   "grok-4.5",
 		"claude-opus-4-7":   "grok-4.5",
 		"claude-opus-4-8":   "grok-4.5",
-		"claude-haiku-4":    "grok-composer-2.5-fast",
-		"claude-haiku-4-5":  "grok-composer-2.5-fast",
+		"claude-haiku-4":    "grok-4.5",
+		"claude-haiku-4-5":  "grok-4.5",
 		"sonnet":            "grok-4.5",
 		"opus":              "grok-4.5",
-		"haiku":             "grok-composer-2.5-fast",
+		"haiku":             "grok-4.5",
 	}
 	for k, v := range wantAliases {
 		if got := cfg.Anthropic.ModelAliases[k]; got != v {
 			t.Fatalf("alias %s: want %q got %q", k, v, got)
 		}
+	}
+	if len(cfg.Upstream.VisibleModels) != 1 || cfg.Upstream.VisibleModels[0] != "grok-4.5" {
+		t.Fatalf("upstream.visible_models: %#v", cfg.Upstream.VisibleModels)
 	}
 	if len(cfg.Anthropic.PassthroughPrefixes) != 1 || cfg.Anthropic.PassthroughPrefixes[0] != "grok-" {
 		t.Fatalf("passthrough_prefixes: %#v", cfg.Anthropic.PassthroughPrefixes)
