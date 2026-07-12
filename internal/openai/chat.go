@@ -63,9 +63,20 @@ type ChatTool struct {
 // ChatToResponses converts a chat.completions body into a minimal Responses body.
 // The returned map is not yet fully sanitized; callers should run SanitizeResponses.
 func ChatToResponses(raw []byte) (map[string]any, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, fmt.Errorf("openai chat: invalid json: %w", err)
+	}
+	messages, ok := fields["messages"]
+	if !ok || strings.TrimSpace(string(messages)) == "null" {
+		return nil, fmt.Errorf("openai chat: missing field `messages`")
+	}
 	var req ChatCompletionRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, fmt.Errorf("openai chat: invalid json: %w", err)
+	}
+	if len(req.Messages) == 0 {
+		return nil, fmt.Errorf("openai chat: messages must not be empty")
 	}
 	return ChatRequestToResponses(&req)
 }
@@ -374,9 +385,19 @@ func contentToString(raw json.RawMessage) (string, error) {
 
 // ResponsesToChat converts a non-stream Responses JSON body into chat.completion.
 func ResponsesToChat(raw []byte) ([]byte, error) {
+	return ResponsesToChatWithModel(raw, "")
+}
+
+// ResponsesToChatWithModel converts a Responses response while retaining the
+// model name requested by the client. The upstream may return an internal
+// tiered name such as grok-4.5-build-free, which is not a valid client model.
+func ResponsesToChatWithModel(raw []byte, requestedModel string) ([]byte, error) {
 	var resp map[string]any
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, fmt.Errorf("openai chat: responses json: %w", err)
+	}
+	if requestedModel = strings.TrimSpace(requestedModel); requestedModel != "" {
+		resp["model"] = requestedModel
 	}
 	out := responsesMapToChat(resp)
 	b, err := json.Marshal(out)

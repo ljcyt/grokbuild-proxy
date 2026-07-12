@@ -102,7 +102,7 @@ func writeJSON(w http.ResponseWriter, status int, raw []byte) {
 }
 
 // proxyUpstreamJSON copies a non-stream upstream response to the client.
-func proxyUpstreamJSON(w http.ResponseWriter, resp *http.Response) {
+func proxyUpstreamJSON(w http.ResponseWriter, resp *http.Response, requestedModel string) {
 	defer resp.Body.Close()
 	copyUpstreamResponseHeaders(w.Header(), resp.Header)
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -114,6 +114,7 @@ func proxyUpstreamJSON(w http.ResponseWriter, resp *http.Response) {
 		MapUpstreamError(w, resp.StatusCode, raw)
 		return
 	}
+	raw = rewriteResponseModel(raw, requestedModel)
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
 		ct = "application/json"
@@ -124,7 +125,7 @@ func proxyUpstreamJSON(w http.ResponseWriter, resp *http.Response) {
 }
 
 // streamUpstreamSSE copies upstream SSE to the client with Flush.
-func streamUpstreamSSE(w http.ResponseWriter, resp *http.Response) {
+func streamUpstreamSSE(w http.ResponseWriter, resp *http.Response, requestedModel string) {
 	defer resp.Body.Close()
 	copyUpstreamResponseHeaders(w.Header(), resp.Header)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -143,21 +144,68 @@ func streamUpstreamSSE(w http.ResponseWriter, resp *http.Response) {
 	w.WriteHeader(resp.StatusCode)
 
 	flusher, _ := w.(http.Flusher)
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-		if err != nil {
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 32<<20)
+	for scanner.Scan() {
+		line := rewriteSSEModelLine(scanner.Bytes(), requestedModel)
+		if _, err := w.Write(append(line, '\n')); err != nil {
 			return
 		}
+		if flusher != nil {
+			flusher.Flush()
+		}
 	}
+}
+
+// rewriteResponseModel returns the original payload if it is not a JSON object.
+func rewriteResponseModel(raw []byte, requestedModel string) []byte {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return raw
+	}
+	var response map[string]any
+	if json.Unmarshal(raw, &response) != nil {
+		return raw
+	}
+	response["model"] = requestedModel
+	updated, err := json.Marshal(response)
+	if err != nil {
+		return raw
+	}
+	return updated
+}
+
+// rewriteSSEModelLine preserves an SSE line unless it contains a JSON event
+// that already carries a model name. It avoids adding fields to delta events.
+func rewriteSSEModelLine(line []byte, requestedModel string) []byte {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" || !bytes.HasPrefix(line, []byte("data:")) {
+		return line
+	}
+	payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+	var event map[string]any
+	if json.Unmarshal(payload, &event) != nil {
+		return line
+	}
+	changed := false
+	if _, ok := event["model"]; ok {
+		event["model"] = requestedModel
+		changed = true
+	}
+	if response, ok := event["response"].(map[string]any); ok {
+		if _, hasModel := response["model"]; hasModel {
+			response["model"] = requestedModel
+			changed = true
+		}
+	}
+	if !changed {
+		return line
+	}
+	updated, err := json.Marshal(event)
+	if err != nil {
+		return line
+	}
+	return append([]byte("data: "), updated...)
 }
 
 func copyUpstreamResponseHeaders(dst, src http.Header) {

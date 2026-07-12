@@ -38,7 +38,8 @@ func (h *Handlers) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_body")
 		return
 	}
-	resolvedModel := h.resolve(res.Model)
+	requestedModel := res.Model
+	resolvedModel := h.resolve(requestedModel)
 	res.Body["model"] = resolvedModel
 	sanitized, err := marshalBody(res.Body)
 	if err != nil {
@@ -57,10 +58,10 @@ func (h *Handlers) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if res.Stream || isSSEContentType(resp.Header.Get("Content-Type")) {
-		streamUpstreamSSE(w, resp)
+		streamUpstreamSSE(w, resp, requestedModel)
 		return
 	}
-	proxyUpstreamJSON(w, resp)
+	proxyUpstreamJSON(w, resp, requestedModel)
 }
 
 // HandleChatCompletions serves POST /v1/chat/completions.
@@ -98,8 +99,9 @@ func (h *Handlers) HandleChatCompletions(w http.ResponseWriter, r *http.Request)
 		WriteError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_body")
 		return
 	}
+	requestedModel := sanitizedRes.Model
 	stream := sanitizedRes.Stream
-	model := h.resolve(sanitizedRes.Model)
+	model := h.resolve(requestedModel)
 	sanitizedRes.Body["model"] = model
 	sanitized, err := marshalBody(sanitizedRes.Body)
 	if err != nil {
@@ -123,7 +125,7 @@ func (h *Handlers) HandleChatCompletions(w http.ResponseWriter, r *http.Request)
 	copyUpstreamResponseHeaders(w.Header(), resp.Header)
 
 	if stream {
-		handleChatStream(w, resp, chatStreamIncludesUsage(raw))
+		handleChatStream(w, resp, chatStreamIncludesUsage(raw), requestedModel)
 		return
 	}
 
@@ -137,7 +139,7 @@ func (h *Handlers) HandleChatCompletions(w http.ResponseWriter, r *http.Request)
 		MapUpstreamError(w, resp.StatusCode, upRaw)
 		return
 	}
-	chatRaw, err := ResponsesToChat(upRaw)
+	chatRaw, err := ResponsesToChatWithModel(upRaw, requestedModel)
 	if err != nil {
 		writeJSON(w, resp.StatusCode, upRaw)
 		return
@@ -160,7 +162,7 @@ func writePostError(w http.ResponseWriter, err error) {
 	WriteError(w, http.StatusBadGateway, "upstream request failed: "+err.Error(), "server_error", "upstream_error")
 }
 
-func handleChatStream(w http.ResponseWriter, resp *http.Response, includeUsage bool) {
+func handleChatStream(w http.ResponseWriter, resp *http.Response, includeUsage bool, requestedModel string) {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -174,7 +176,7 @@ func handleChatStream(w http.ResponseWriter, resp *http.Response, includeUsage b
 			WriteError(w, http.StatusBadGateway, "failed to read upstream response", "server_error", "upstream_read_error")
 			return
 		}
-		chatRaw, err := ResponsesToChat(raw)
+		chatRaw, err := ResponsesToChatWithModel(raw, requestedModel)
 		if err != nil {
 			WriteError(w, http.StatusNotImplemented, "chat stream conversion not available for this upstream response", "server_error", "stream_not_supported")
 			return
@@ -190,7 +192,7 @@ func handleChatStream(w http.ResponseWriter, resp *http.Response, includeUsage b
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 
-	translator := newChatStreamTranslator(includeUsage)
+	translator := newChatStreamTranslator(includeUsage, requestedModel)
 	var processErr error
 	scanErr := scanSSEDataLines(resp.Body, func(data []byte) bool {
 		chunks, err := translator.process(data)

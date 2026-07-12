@@ -20,6 +20,7 @@ type chatToolStream struct {
 type chatStreamTranslator struct {
 	id           string
 	model        string
+	fixedModel   string
 	created      int64
 	sentRole     bool
 	terminal     bool
@@ -31,9 +32,11 @@ type chatStreamTranslator struct {
 	nextTool     int
 }
 
-func newChatStreamTranslator(includeUsage bool) *chatStreamTranslator {
+func newChatStreamTranslator(includeUsage bool, requestedModel string) *chatStreamTranslator {
 	return &chatStreamTranslator{
 		id:           "chatcmpl-proxy",
+		model:        strings.TrimSpace(requestedModel),
+		fixedModel:   strings.TrimSpace(requestedModel),
 		created:      time.Now().Unix(),
 		includeUsage: includeUsage,
 		tools:        make(map[string]*chatToolStream),
@@ -200,7 +203,7 @@ func (t *chatStreamTranslator) updateResponseMetadata(response map[string]any) {
 		}
 		t.id = id
 	}
-	if model := asString(response["model"]); model != "" {
+	if model := asString(response["model"]); model != "" && t.fixedModel == "" {
 		t.model = model
 	}
 	if created, ok := asInt64(response["created_at"]); ok && created > 0 {

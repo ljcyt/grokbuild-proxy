@@ -428,6 +428,21 @@ func TestChatToResponsesRejectsSemanticLoss(t *testing.T) {
 	}
 }
 
+func TestChatToResponsesRequiresMessages(t *testing.T) {
+	for _, raw := range []string{
+		`{}`,
+		`{"model":"grok-4.5"}`,
+		`{"model":"grok-4.5","messages":null}`,
+	} {
+		if _, err := ChatToResponses([]byte(raw)); err == nil || !strings.Contains(err.Error(), "missing field `messages`") {
+			t.Fatalf("raw=%s error=%v", raw, err)
+		}
+	}
+	if _, err := ChatToResponses([]byte(`{"model":"grok-4.5","messages":[]}`)); err == nil || !strings.Contains(err.Error(), "messages must not be empty") {
+		t.Fatalf("empty messages error=%v", err)
+	}
+}
+
 func TestResponsesToChat_TextAndTools(t *testing.T) {
 	raw := []byte(`{
 		"id":"resp_1",
@@ -473,7 +488,7 @@ func TestResponsesToChat_TextAndTools(t *testing.T) {
 }
 
 func TestHandleResponses_NonStream(t *testing.T) {
-	fixed := []byte(`{"id":"resp_ok","model":"grok-4.5","output":[],"status":"completed"}`)
+	fixed := []byte(`{"id":"resp_ok","model":"grok-4.5-build-free","output":[],"status":"completed"}`)
 	h := &Handlers{
 		Post: func(ctx context.Context, model, convID string, body []byte, stream bool) (*http.Response, error) {
 			if stream {
@@ -515,6 +530,13 @@ func TestHandleResponses_NonStream(t *testing.T) {
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"resp_ok"`)) {
 		t.Fatalf("body %s", rr.Body.String())
 	}
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if got := asString(response["model"]); got != "grok-4.5" {
+		t.Fatalf("response model=%q", got)
+	}
 }
 
 func TestHandleResponses_ResolvesConfiguredAlias(t *testing.T) {
@@ -553,7 +575,7 @@ func TestHandleResponses_ResolvesConfiguredAlias(t *testing.T) {
 }
 
 func TestHandleResponses_StreamFlush(t *testing.T) {
-	sse := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: [DONE]\n\n"
+	sse := "data: {\"type\":\"response.created\",\"response\":{\"model\":\"grok-4.5-build-free\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: [DONE]\n\n"
 	h := &Handlers{
 		Post: func(ctx context.Context, model, convID string, body []byte, stream bool) (*http.Response, error) {
 			if !stream {
@@ -578,6 +600,9 @@ func TestHandleResponses_StreamFlush(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "response.output_text.delta") {
 		t.Fatalf("body %s", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "grok-4.5-build-free") || !strings.Contains(rr.Body.String(), `"model":"m"`) {
+		t.Fatalf("stream model was not normalized: %s", rr.Body.String())
 	}
 }
 
@@ -609,7 +634,7 @@ func TestHandleResponses_UpstreamError(t *testing.T) {
 func TestHandleChatCompletions_NonStream(t *testing.T) {
 	up := []byte(`{
 		"id":"resp_chat",
-		"model":"grok-4.5",
+		"model":"grok-4.5-build-free",
 		"created_at": 1700000001,
 		"output":[{"type":"message","content":[{"type":"output_text","text":"pong"}]}],
 		"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
@@ -647,6 +672,9 @@ func TestHandleChatCompletions_NonStream(t *testing.T) {
 	}
 	if asString(chat["object"]) != "chat.completion" {
 		t.Fatalf("object %v", chat["object"])
+	}
+	if got := asString(chat["model"]); got != "grok-4.5" {
+		t.Fatalf("chat response model=%q", got)
 	}
 	choices := chat["choices"].([]any)
 	msg := choices[0].(map[string]any)["message"].(map[string]any)
@@ -709,7 +737,7 @@ func TestHandleChatCompletions_ResolvesConfiguredAlias(t *testing.T) {
 
 func TestHandleChatCompletions_StreamParallelToolsAndUsage(t *testing.T) {
 	sse := strings.Join([]string{
-		`data: {"type":"response.created","response":{"id":"resp_chat_stream","model":"grok-4.5","created_at":1700000002}}`,
+		`data: {"type":"response.created","response":{"id":"resp_chat_stream","model":"grok-4.5-build-free","created_at":1700000002}}`,
 		``,
 		`data: {"type":"response.output_item.added","item":{"id":"fc_1","call_id":"call_1","type":"function_call","name":"one"}}`,
 		``,
@@ -762,6 +790,9 @@ func TestHandleChatCompletions_StreamParallelToolsAndUsage(t *testing.T) {
 	}
 	if !strings.HasSuffix(body, "data: [DONE]\n\n") {
 		t.Fatalf("missing DONE: %s", body)
+	}
+	if strings.Contains(body, "grok-4.5-build-free") || !strings.Contains(body, `"model":"grok-4.5"`) {
+		t.Fatalf("stream response model=%s", body)
 	}
 }
 
