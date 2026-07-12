@@ -103,7 +103,9 @@ accounts before they hit the quota boundary. The Admin credential list filters a
 loads billing only when an operator selects **Billing**, so opening a large
 pool does not fan out one upstream billing request per account. The credential
 list is server-paginated: `page`, `page_size` (1-100), `q`, and `status`
-(`all`, `available`, `cooling`, or `disabled`) are accepted by
+(`all`, `available`, `cooling`, `healthy`, `rate_limited`, `quota_exhausted`,
+`unauthorized`, `quarantined`, `uninspected`, `inspection_error`, `expired`,
+or `disabled`) are accepted by
 `GET /admin/credentials`; the Admin UI requests 24 accounts per page.
 
 ## Request raw path overrides

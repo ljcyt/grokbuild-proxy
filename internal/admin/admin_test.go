@@ -344,6 +344,10 @@ func TestAdminCredentialsPaginationAndFiltering(t *testing.T) {
 	store.creds["beta-cooling"] = storage.Credential{ID: "beta-cooling", AccessToken: "access-c", Enabled: true, CooldownUntil: &cooldown}
 	store.creds["gamma-disabled"] = storage.Credential{ID: "gamma-disabled", Enabled: false}
 	store.creds["delta"] = storage.Credential{ID: "delta", AccessToken: "access-d", Enabled: true}
+	inspectedAt := now.Add(-time.Minute)
+	store.creds["health"] = storage.Credential{ID: "health", AccessToken: "access-e", Enabled: true, LastInspectionAt: &inspectedAt, LastInspectionStatus: "healthy"}
+	store.creds["quota"] = storage.Credential{ID: "quota", AccessToken: "access-f", Enabled: true, LastError: "quota_exhausted"}
+	store.creds["invalid"] = storage.Credential{ID: "invalid", Enabled: false, LifecycleState: storage.CredentialStateQuarantined, DisableReason: storage.DisableReasonInvalidAuth, LastInspectionAt: &inspectedAt, LastInspectionStatus: "unauthorized"}
 	h := &Handlers{Store: store, AdminKey: "sk-admin-test", Config: config.Default()}
 
 	request := func(path string) *httptest.ResponseRecorder {
@@ -367,10 +371,10 @@ func TestAdminCredentialsPaginationAndFiltering(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(page.Credentials) != 2 || page.Pagination.Page != 2 ||
-		page.Pagination.PageSize != 2 || page.Pagination.Total != 5 || page.Pagination.TotalPages != 3 {
+		page.Pagination.PageSize != 2 || page.Pagination.Total != 8 || page.Pagination.TotalPages != 4 {
 		t.Fatalf("unexpected page: %+v credentials=%d", page.Pagination, len(page.Credentials))
 	}
-	if page.Pool.Total != 5 || page.Pool.Available != 3 || page.Pool.Cooling != 1 || page.Pool.Disabled != 1 {
+	if page.Pool.Total != 8 || page.Pool.Available != 5 || page.Pool.Cooling != 1 || page.Pool.Disabled != 2 {
 		t.Fatalf("unexpected pool: %+v", page.Pool)
 	}
 
@@ -383,6 +387,35 @@ func TestAdminCredentialsPaginationAndFiltering(t *testing.T) {
 	}
 	if len(page.Credentials) != 2 || page.Pagination.Total != 2 {
 		t.Fatalf("unexpected filtered page: %+v credentials=%d", page.Pagination, len(page.Credentials))
+	}
+
+	for _, tc := range []struct {
+		status string
+		id     string
+	}{
+		{status: "healthy", id: "health"},
+		{status: "quota_exhausted", id: "quota"},
+		{status: "unauthorized", id: "invalid"},
+		{status: "quarantined", id: "invalid"},
+		{status: "uninspected", id: "alpha-one"},
+	} {
+		rr = request("/admin/credentials?status=" + tc.status)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status filter %s: code=%d body=%s", tc.status, rr.Code, rr.Body.String())
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, credential := range page.Credentials {
+			if credential["id"] == tc.id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("status filter %s missing %s: %+v", tc.status, tc.id, page.Credentials)
+		}
 	}
 
 	rr = request("/admin/credentials?status=unknown")

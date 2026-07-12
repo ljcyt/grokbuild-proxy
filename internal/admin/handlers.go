@@ -337,12 +337,13 @@ func credentialListQuery(r *http.Request) (page, pageSize int, query, status str
 	}
 	status = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
 	switch status {
-	case "", "all", "available", "cooling", "disabled":
+	case "", "all", "available", "cooling", "disabled", "healthy", "rate_limited",
+		"quota_exhausted", "unauthorized", "quarantined", "uninspected", "inspection_error", "expired":
 		if status == "" {
 			status = "all"
 		}
 	default:
-		return 0, 0, "", "", fmt.Errorf("status must be all, available, cooling, or disabled")
+		return 0, 0, "", "", fmt.Errorf("invalid credential status filter")
 	}
 	return page, pageSize, query, status, nil
 }
@@ -376,6 +377,40 @@ func filterCredentials(creds []storage.Credential, query, status string, now tim
 			if credential.Enabled {
 				continue
 			}
+		case "healthy":
+			if credential.LastInspectionStatus != "healthy" {
+				continue
+			}
+		case "rate_limited":
+			if credential.LastInspectionStatus != "rate_limited" {
+				continue
+			}
+		case "quota_exhausted":
+			if credential.LastInspectionStatus != "quota_exhausted" && credential.LastError != "quota_exhausted" {
+				continue
+			}
+		case "unauthorized":
+			if credential.LastInspectionStatus != "unauthorized" &&
+				credential.LastInspectionStatus != "unauthorized_unconfirmed" &&
+				credential.DisableReason != storage.DisableReasonInvalidAuth {
+				continue
+			}
+		case "quarantined":
+			if credential.LifecycleState != storage.CredentialStateQuarantined {
+				continue
+			}
+		case "uninspected":
+			if credential.LastInspectionAt != nil || credential.LastInspectionStatus != "" {
+				continue
+			}
+		case "inspection_error":
+			if !isInspectionErrorStatus(credential.LastInspectionStatus) {
+				continue
+			}
+		case "expired":
+			if credential.ExpiresAt.IsZero() || credential.ExpiresAt.After(now) {
+				continue
+			}
 		}
 		if query != "" {
 			haystack := strings.ToLower(strings.Join([]string{
@@ -392,6 +427,15 @@ func filterCredentials(creds []storage.Credential, query, status string, now tim
 		filtered = append(filtered, credential)
 	}
 	return filtered
+}
+
+func isInspectionErrorStatus(status string) bool {
+	switch status {
+	case "state_changed", "settings_changed", "mass_failure_guard", "storage_error":
+		return true
+	default:
+		return false
+	}
 }
 
 // CreateCredential POST /admin/credentials
