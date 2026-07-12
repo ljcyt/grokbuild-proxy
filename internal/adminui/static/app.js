@@ -18,6 +18,7 @@
     credentialPool: null,
     credentialSearchTimer: null,
     credentialLoadSequence: 0,
+    inspectionPollSequence: 0,
     busy: false,
   };
 
@@ -1376,6 +1377,10 @@
     inspectConfirm.input.value = inspection.confirm_unauthorized || 2;
     var inspectPurge = settingInput("隔离后自动删除（秒，0 表示不删除）", "number");
     inspectPurge.input.value = inspection.purge_after_sec || 0;
+    var inspectBatch = settingInput("每轮最多检测账号数", "number");
+    inspectBatch.input.value = inspection.max_credentials_per_run || 100;
+    var inspectSkipRecent = settingInput("跳过近期成功账号（秒）", "number");
+    inspectSkipRecent.input.value = inspection.skip_recent_success_sec || 900;
     [
       inspectEnabled,
       inspectInterval,
@@ -1383,31 +1388,53 @@
       inspectConcurrency,
       inspectConfirm,
       inspectPurge,
+      inspectBatch,
+      inspectSkipRecent,
     ].forEach(function (item) {
       wrap.appendChild(item.field);
     });
-    wrap.appendChild(el("p", "muted", "401 经刷新复核后隔离；429 只进入冷却，不会被判定为失效。"));
+    wrap.appendChild(el("p", "muted", "每轮按最久未检测账号优先；401 经刷新复核后隔离，429 只进入冷却。"));
     var inspectionStatus = el("p", "muted", "巡检状态加载中…");
     wrap.appendChild(inspectionStatus);
-    api("GET", "/admin/inspection")
-      .then(function (data) {
+    var inspectionPollSequence = ++state.inspectionPollSequence;
+    function showInspectionSummary(prefix, summary) {
+      return prefix + "已检测 " + num(summary.inspected) +
+        " · 跳过 " + num(summary.skipped) +
+        " · 正常 " + num(summary.healthy) +
+        " · 隔离 " + num(summary.quarantined) +
+        " · 限流/额度 " + num(summary.rate_limited) +
+        " · 错误 " + num(summary.errors) +
+        (summary.mass_failure_guard ? " · 已触发批量故障保护" : "");
+    }
+    function refreshInspectionStatus() {
+      api("GET", "/admin/inspection")
+        .then(function (data) {
+          if (inspectionPollSequence !== state.inspectionPollSequence) return;
         if (data.running) {
-          setText(inspectionStatus, "巡检正在运行");
+            var progress = data.progress || {};
+            setText(
+              inspectionStatus,
+              "巡检中：" + num(progress.completed) + "/" + num(progress.scheduled) +
+                " · 候选 " + num(progress.eligible) +
+                " · 跳过 " + num(progress.skipped) +
+                " · 正常 " + num(progress.healthy) +
+                " · 限流/额度 " + num(progress.rate_limited) +
+                " · 错误 " + num(progress.errors)
+            );
+            setTimeout(refreshInspectionStatus, 2000);
         } else if (data.has_run && data.last) {
-          setText(
-            inspectionStatus,
-            "上次巡检：" + fmtTime(data.last.finished_at) +
-              " · 正常 " + num(data.last.healthy) +
-              " · 隔离 " + num(data.last.quarantined) +
-              " · 429 " + num(data.last.rate_limited)
-          );
+            setText(inspectionStatus, showInspectionSummary("上次巡检（" + fmtTime(data.last.finished_at) + "）：", data.last));
         } else {
-          setText(inspectionStatus, "尚未执行巡检");
+            setText(inspectionStatus, "尚未执行巡检（当前每轮最多检测 " + inspectBatch.input.value + " 个账号）");
         }
-      })
-      .catch(function () {
-        setText(inspectionStatus, "巡检状态不可用");
-      });
+        })
+        .catch(function () {
+          if (inspectionPollSequence === state.inspectionPollSequence) {
+            setText(inspectionStatus, "巡检状态不可用");
+          }
+        });
+    }
+    refreshInspectionStatus();
     var runInspection = el("button", "btn", "立即巡检");
     runInspection.type = "button";
     runInspection.addEventListener("click", function () {
@@ -1417,10 +1444,7 @@
         .then(function (summary) {
           setText(
             inspectionStatus,
-            "巡检完成：正常 " + num(summary.healthy) +
-              " · 隔离 " + num(summary.quarantined) +
-              " · 429 " + num(summary.rate_limited) +
-              (summary.mass_failure_guard ? " · 已触发批量故障保护" : "")
+            showInspectionSummary("巡检完成：", summary)
           );
           loadCredentials();
         })
@@ -1466,6 +1490,8 @@
         concurrency: parseInt(inspectConcurrency.input.value, 10),
         confirm_unauthorized: parseInt(inspectConfirm.input.value, 10),
         purge_after_sec: parseInt(inspectPurge.input.value, 10),
+        max_credentials_per_run: parseInt(inspectBatch.input.value, 10),
+        skip_recent_success_sec: parseInt(inspectSkipRecent.input.value, 10),
       });
       save.disabled = true;
       api("PUT", "/admin/settings", payload)

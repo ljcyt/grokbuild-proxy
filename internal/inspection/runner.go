@@ -65,6 +65,20 @@ type Summary struct {
 	Results          []Result  `json:"results,omitempty"`
 }
 
+// Progress is an in-memory snapshot for the Admin panel while a scan is
+// running. It deliberately exposes counts only, never credential material.
+type Progress struct {
+	StartedAt    time.Time `json:"started_at"`
+	Eligible     int       `json:"eligible"`
+	Scheduled    int       `json:"scheduled"`
+	Completed    int       `json:"completed"`
+	Skipped      int       `json:"skipped"`
+	Healthy      int       `json:"healthy"`
+	Unauthorized int       `json:"unauthorized"`
+	RateLimited  int       `json:"rate_limited"`
+	Errors       int       `json:"errors"`
+}
+
 type Runner struct {
 	Store             Store
 	Prober            Prober
@@ -77,10 +91,11 @@ type Runner struct {
 	// alternative stores.
 	InvalidateCredential func(string)
 
-	mu      sync.RWMutex
-	running bool
-	last    *Summary
-	now     func() time.Time
+	mu       sync.RWMutex
+	running  bool
+	last     *Summary
+	progress *Progress
+	now      func() time.Time
 }
 
 func (r *Runner) Run(ctx context.Context) {
@@ -130,6 +145,7 @@ func (r *Runner) RunOnce(ctx context.Context) (Summary, error) {
 	defer func() {
 		r.mu.Lock()
 		r.running = false
+		r.progress = nil
 		r.mu.Unlock()
 	}()
 
@@ -198,6 +214,12 @@ func (r *Runner) RunOnce(ctx context.Context) (Summary, error) {
 	}
 	candidates := append([]candidate(nil), eligibleCandidates[:limit]...)
 	summary.Skipped += len(eligibleCandidates) - len(candidates)
+	r.setProgress(Progress{
+		StartedAt: now,
+		Eligible:  len(eligibleCandidates),
+		Scheduled: len(candidates),
+		Skipped:   summary.Skipped,
+	})
 
 	// A semaphore inside one goroutine per credential still allocates an
 	// unbounded number of waiting goroutine stacks. Feed a fixed worker pool so
@@ -236,6 +258,7 @@ func (r *Runner) RunOnce(ctx context.Context) (Summary, error) {
 				probeCtx, cancel := context.WithTimeout(ctx, timeout)
 				result, observed := r.inspectOne(probeCtx, credential, settings.ConfirmUnauthorized, settingsRevision)
 				cancel()
+				r.recordProgress(result)
 				if observed.ID == "" {
 					observed = credential
 				}
@@ -459,6 +482,44 @@ func (r *Runner) Running() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.running
+}
+
+// Progress returns the current run counters while inspection is active.
+func (r *Runner) Progress() (Progress, bool) {
+	if r == nil {
+		return Progress{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if !r.running || r.progress == nil {
+		return Progress{}, false
+	}
+	return *r.progress, true
+}
+
+func (r *Runner) setProgress(progress Progress) {
+	r.mu.Lock()
+	r.progress = &progress
+	r.mu.Unlock()
+}
+
+func (r *Runner) recordProgress(result Result) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.progress == nil {
+		return
+	}
+	r.progress.Completed++
+	switch result.Status {
+	case "healthy":
+		r.progress.Healthy++
+	case "unauthorized":
+		r.progress.Unauthorized++
+	case "rate_limited", "quota_exhausted":
+		r.progress.RateLimited++
+	default:
+		r.progress.Errors++
+	}
 }
 
 func (r *Runner) inspectOne(ctx context.Context, credential storage.Credential, confirmations int, settingsRevision uint64) (Result, storage.Credential) {

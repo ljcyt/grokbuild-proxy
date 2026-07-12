@@ -107,44 +107,44 @@ type Handlers struct {
 
 // maskedCredential is a credential view with secrets redacted.
 type maskedCredential struct {
-	ID                   string         `json:"id"`
-	Name                 string         `json:"name"`
-	Email                string         `json:"email,omitempty"`
-	UserID               string         `json:"user_id,omitempty"`
-	TeamID               string         `json:"team_id,omitempty"`
-	OIDCClientID         string         `json:"oidc_client_id,omitempty"`
-	OIDCIssuer           string         `json:"oidc_issuer,omitempty"`
-	AccessToken          string         `json:"access_token"`  // masked
-	RefreshToken         string         `json:"refresh_token"` // masked
-	HasAccess            bool           `json:"has_access_token"`
-	HasRefresh           bool           `json:"has_refresh_token"`
-	ExpiresAt            time.Time      `json:"expires_at"`
-	Enabled              bool           `json:"enabled"`
-	ManualDisabled       bool           `json:"manual_disabled,omitempty"`
-	LifecycleState       string         `json:"lifecycle_state,omitempty"`
-	DisableReason        string         `json:"disable_reason,omitempty"`
-	QuarantinedAt        *time.Time     `json:"quarantined_at,omitempty"`
-	PurgeAfter           *time.Time     `json:"purge_after,omitempty"`
-	ProxyMode            string         `json:"proxy_mode,omitempty"`
-	ProxyURL             string         `json:"proxy_url,omitempty"`
-	EffectiveProxy       map[string]any `json:"effective_proxy,omitempty"`
-	Priority             int            `json:"priority"`
-	FailureCount         int            `json:"failure_count"`
-	CooldownUntil        *time.Time     `json:"cooldown_until,omitempty"`
-	LastError            string         `json:"last_error,omitempty"`
-	LastUsedAt           *time.Time     `json:"last_used_at,omitempty"`
-	LastSuccessAt        *time.Time     `json:"last_success_at,omitempty"`
-	LastInspectionAt     *time.Time     `json:"last_inspection_at,omitempty"`
-	LastInspectionStatus string         `json:"last_inspection_status,omitempty"`
-	LastInspectionError  string         `json:"last_inspection_error,omitempty"`
+	ID                         string         `json:"id"`
+	Name                       string         `json:"name"`
+	Email                      string         `json:"email,omitempty"`
+	UserID                     string         `json:"user_id,omitempty"`
+	TeamID                     string         `json:"team_id,omitempty"`
+	OIDCClientID               string         `json:"oidc_client_id,omitempty"`
+	OIDCIssuer                 string         `json:"oidc_issuer,omitempty"`
+	AccessToken                string         `json:"access_token"`  // masked
+	RefreshToken               string         `json:"refresh_token"` // masked
+	HasAccess                  bool           `json:"has_access_token"`
+	HasRefresh                 bool           `json:"has_refresh_token"`
+	ExpiresAt                  time.Time      `json:"expires_at"`
+	Enabled                    bool           `json:"enabled"`
+	ManualDisabled             bool           `json:"manual_disabled,omitempty"`
+	LifecycleState             string         `json:"lifecycle_state,omitempty"`
+	DisableReason              string         `json:"disable_reason,omitempty"`
+	QuarantinedAt              *time.Time     `json:"quarantined_at,omitempty"`
+	PurgeAfter                 *time.Time     `json:"purge_after,omitempty"`
+	ProxyMode                  string         `json:"proxy_mode,omitempty"`
+	ProxyURL                   string         `json:"proxy_url,omitempty"`
+	EffectiveProxy             map[string]any `json:"effective_proxy,omitempty"`
+	Priority                   int            `json:"priority"`
+	FailureCount               int            `json:"failure_count"`
+	CooldownUntil              *time.Time     `json:"cooldown_until,omitempty"`
+	LastError                  string         `json:"last_error,omitempty"`
+	LastUsedAt                 *time.Time     `json:"last_used_at,omitempty"`
+	LastSuccessAt              *time.Time     `json:"last_success_at,omitempty"`
+	LastInspectionAt           *time.Time     `json:"last_inspection_at,omitempty"`
+	LastInspectionStatus       string         `json:"last_inspection_status,omitempty"`
+	LastInspectionError        string         `json:"last_inspection_error,omitempty"`
 	RateLimitLimitRequests     *int64         `json:"rate_limit_limit_requests,omitempty"`
 	RateLimitRemainingRequests *int64         `json:"rate_limit_remaining_requests,omitempty"`
 	RateLimitLimitTokens       *int64         `json:"rate_limit_limit_tokens,omitempty"`
 	RateLimitRemainingTokens   *int64         `json:"rate_limit_remaining_tokens,omitempty"`
 	RateLimitObservedAt        *time.Time     `json:"rate_limit_observed_at,omitempty"`
-	Billing              map[string]any `json:"billing,omitempty"`
-	CreatedAt            time.Time      `json:"created_at"`
-	UpdatedAt            time.Time      `json:"updated_at"`
+	Billing                    map[string]any `json:"billing,omitempty"`
+	CreatedAt                  time.Time      `json:"created_at"`
+	UpdatedAt                  time.Time      `json:"updated_at"`
 }
 
 func (h *Handlers) maskedCredential(c storage.Credential) maskedCredential {
@@ -159,43 +159,43 @@ func (h *Handlers) maskedCredential(c storage.Credential) maskedCredential {
 
 func maskCredential(c storage.Credential) maskedCredential {
 	return maskedCredential{
-		ID:                   c.ID,
-		Name:                 c.Name,
-		Email:                c.Email,
-		UserID:               c.UserID,
-		TeamID:               c.TeamID,
-		OIDCClientID:         c.OIDCClientID,
-		OIDCIssuer:           c.OIDCIssuer,
-		AccessToken:          maskSecret(c.AccessToken),
-		RefreshToken:         maskSecret(c.RefreshToken),
-		HasAccess:            strings.TrimSpace(c.AccessToken) != "",
-		HasRefresh:           strings.TrimSpace(c.RefreshToken) != "",
-		ExpiresAt:            c.ExpiresAt,
-		Enabled:              c.Enabled,
-		ManualDisabled:       c.ManualDisabled,
-		LifecycleState:       c.LifecycleState,
-		DisableReason:        c.DisableReason,
-		QuarantinedAt:        c.QuarantinedAt,
-		PurgeAfter:           c.PurgeAfter,
-		ProxyMode:            c.ProxyMode,
-		ProxyURL:             outbound.RedactedURL(c.ProxyURL),
-		Priority:             c.Priority,
-		FailureCount:         c.FailureCount,
-		CooldownUntil:        c.CooldownUntil,
-		LastError:            c.LastError,
-		LastUsedAt:           c.LastUsedAt,
-		LastSuccessAt:        c.LastSuccessAt,
-		LastInspectionAt:     c.LastInspectionAt,
-		LastInspectionStatus: c.LastInspectionStatus,
-		LastInspectionError:  c.LastInspectionError,
+		ID:                         c.ID,
+		Name:                       c.Name,
+		Email:                      c.Email,
+		UserID:                     c.UserID,
+		TeamID:                     c.TeamID,
+		OIDCClientID:               c.OIDCClientID,
+		OIDCIssuer:                 c.OIDCIssuer,
+		AccessToken:                maskSecret(c.AccessToken),
+		RefreshToken:               maskSecret(c.RefreshToken),
+		HasAccess:                  strings.TrimSpace(c.AccessToken) != "",
+		HasRefresh:                 strings.TrimSpace(c.RefreshToken) != "",
+		ExpiresAt:                  c.ExpiresAt,
+		Enabled:                    c.Enabled,
+		ManualDisabled:             c.ManualDisabled,
+		LifecycleState:             c.LifecycleState,
+		DisableReason:              c.DisableReason,
+		QuarantinedAt:              c.QuarantinedAt,
+		PurgeAfter:                 c.PurgeAfter,
+		ProxyMode:                  c.ProxyMode,
+		ProxyURL:                   outbound.RedactedURL(c.ProxyURL),
+		Priority:                   c.Priority,
+		FailureCount:               c.FailureCount,
+		CooldownUntil:              c.CooldownUntil,
+		LastError:                  c.LastError,
+		LastUsedAt:                 c.LastUsedAt,
+		LastSuccessAt:              c.LastSuccessAt,
+		LastInspectionAt:           c.LastInspectionAt,
+		LastInspectionStatus:       c.LastInspectionStatus,
+		LastInspectionError:        c.LastInspectionError,
 		RateLimitLimitRequests:     c.RateLimitLimitRequests,
 		RateLimitRemainingRequests: c.RateLimitRemainingRequests,
 		RateLimitLimitTokens:       c.RateLimitLimitTokens,
 		RateLimitRemainingTokens:   c.RateLimitRemainingTokens,
 		RateLimitObservedAt:        c.RateLimitObservedAt,
-		Billing:              c.Billing,
-		CreatedAt:            c.CreatedAt,
-		UpdatedAt:            c.UpdatedAt,
+		Billing:                    c.Billing,
+		CreatedAt:                  c.CreatedAt,
+		UpdatedAt:                  c.UpdatedAt,
 	}
 }
 
@@ -991,11 +991,19 @@ func (h *Handlers) InspectionStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	last, ok := h.Inspection.Last()
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"running": h.Inspection.Running(),
 		"has_run": ok,
 		"last":    last,
-	})
+	}
+	if progressProvider, ok := h.Inspection.(interface {
+		Progress() (inspection.Progress, bool)
+	}); ok {
+		if progress, active := progressProvider.Progress(); active {
+			response["progress"] = progress
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // RunInspection POST /admin/inspection/run.

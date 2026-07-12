@@ -508,12 +508,19 @@ func TestRunOnceRejectsOverlap(t *testing.T) {
 		done <- err
 	}()
 	<-prober.started
+	progress, active := runner.Progress()
+	if !active || progress.Scheduled != 1 || progress.Completed != 0 {
+		t.Fatalf("progress=%+v active=%v", progress, active)
+	}
 	if _, err := runner.RunOnce(context.Background()); err == nil {
 		t.Fatal("overlapping inspection run was accepted")
 	}
 	close(prober.release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+	if _, active := runner.Progress(); active {
+		t.Fatal("progress should clear after the run completes")
 	}
 }
 
