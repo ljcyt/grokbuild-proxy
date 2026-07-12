@@ -97,6 +97,12 @@ replay; it does not decrypt or reinterpret the content.
 | Global and credential-specific direct/HTTP(S)/SOCKS routing | Supported |
 | Scheduled/manual inspection with 401 confirmation | Supported |
 | 429 cooldown without quarantine | Supported |
+| Quota exhausted (`100%` weekly usage or HTTP 402) max cooldown | Supported; not OAuth quarantine |
+| Configurable multi-credential failover depth (`lb.max_attempts`) | Supported (1-20, default 3) |
+| Least-inflight selection within the same priority | Supported |
+| Lightweight candidate-pool selection per generation request | Supported |
+| Admin credential list pagination/filter (`page`, `page_size`, `q`, `status`) | Supported |
+| On-demand Admin billing load | Supported |
 | Quarantine recovery after token rotation | Supported |
 | Automatic physical cleanup | Optional; disabled by default |
 | Grok Build shared weekly quota view | Supported when upstream reports it |

@@ -32,14 +32,15 @@ thinking blocks, encrypted reasoning replay, and Grok-hosted web search.
 - JSON Schema output mapped to Responses `text.format`
 - Adaptive/manual reasoning-effort compatibility
 - Summarized/omitted thinking and encrypted reasoning replay
-- Multi-account selection, sticky sessions, cooldown, and failover
+- Multi-account selection, sticky sessions, least-inflight priority tie-break, and configurable failover depth
+- Lightweight candidate-pool selection: one snapshot of id/enabled/priority/cooldown per request
 - Grok CLI import and browser OAuth device login
 - Multi-file Grok/CPA JSON and optional SSO batch import with per-item results
 - Global and per-credential HTTP(S)/SOCKS proxy routing
-- Conservative credential inspection, quarantine, and optional delayed cleanup
+- Conservative inspection with 401 quarantine, 429 cooldown, quota-exhausted max cooldown, and optional delayed cleanup
 - Grok Build shared-weekly-quota view with raw billing diagnostics
 - Atomic local JSON storage with locking and backup recovery
-- Embedded Admin Web UI
+- Embedded Admin Web UI with paginated credentials, on-demand billing, and dark gray theme
 - Health, readiness, Prometheus metrics, request IDs, and structured logs
 - Multi-platform archives, checksums, SBOMs, and GHCR images
 

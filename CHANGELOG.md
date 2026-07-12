@@ -8,6 +8,46 @@ Releases 为准。
 
 ## [Unreleased] / 未发布
 
+### 简体中文
+
+#### 新增
+
+- `lb.max_attempts` 可配置（默认 3，范围 1-20），控制单次请求可尝试的不同账号数。
+- 同优先级选号在会话粘滞之外优先选择在途请求更少的账号，降低并发热点。
+- 生成请求热路径使用一次性轻量候选池（仅 ID / 启用 / 优先级 / 冷却），选中后再加载完整凭据。
+- Admin 凭据列表支持服务端分页与筛选：`page`、`page_size`（1-100）、`q`、`status`。
+- 巡检在 `/models` 通过后检查周额度；`100%` 或上游 `402` 记为 `quota_exhausted` 并进入最长冷却，不按 OAuth 失效隔离。
+
+#### 变更
+
+- Admin UI 账号列表改为分页、搜索、状态筛选；账单改为点击后按需加载，避免每账号一次 billing 扇出。
+- Admin UI 切换为 TTK 风格深灰主题与更紧凑的实体按钮样式。
+- 请求结束、失败、刷新竞态与 426 等路径归还在途占用，避免调度计数泄漏。
+
+#### 修复
+
+- Windows 上存储测试的权限位断言与 `.instance.lock` 清理兼容性。
+
+### English
+
+#### Added
+
+- Configurable `lb.max_attempts` (default 3, range 1-20) for distinct credential failover depth.
+- Within the same priority, selection prefers the least in-flight credential before round-robin.
+- Generation hot path snapshots a lightweight candidate pool once (id / enabled / priority / cooldown) and loads the full credential only after pick.
+- Admin credential list pagination and filters: `page`, `page_size` (1-100), `q`, `status`.
+- Inspection probes `/models` then weekly quota; 100% usage or HTTP 402 is recorded as `quota_exhausted` with maximum cooldown, not OAuth quarantine.
+
+#### Changed
+
+- Admin UI credential list is paginated/searchable/filterable; billing loads on demand instead of one request per card.
+- Admin UI uses a TTK-style dark gray theme with compact solid buttons.
+- In-flight selection counts are released on success, failure, refresh races, and non-failover 426 paths.
+
+#### Fixed
+
+- Windows-portable storage tests for permission bits and `.instance.lock` cleanup.
+
 ## [0.2.0] - 2026-07-11
 
 ### 简体中文

@@ -36,14 +36,15 @@ OpenAI 兼容客户端。
 - Adaptive / Manual Thinking 与思考强度兼容
 - Summarized / Omitted Thinking Block
 - 工具轮次间的加密 Reasoning 回放
-- 多账号选择、会话粘滞、冷却和故障切换
+- 多账号选择、会话粘滞、同优先级在途均衡、可配置故障切换深度
+- 轻量候选池选号：一次请求只快照必要字段，选中后再加载完整凭据
 - Grok/CPA JSON、多文件及可选 SSO 批量导入
 - 全局与凭据级 HTTP(S)/SOCKS 出站代理
-- 保守的自动巡检、401 确认隔离、429 冷却及可选延迟清理
+- 保守的自动巡检、401 确认隔离、429 冷却、额度耗尽最长冷却及可选延迟清理
 - Grok Build 共享周额度主视图与原始账单诊断
 - 浏览器 OAuth Device Login
 - 带文件锁、原子写入和备份恢复的本地 JSON 存储
-- 内嵌 Admin Web UI
+- 内嵌 Admin Web UI（凭据分页/筛选、按需账单、深灰主题）
 - 健康检查、Readiness、Prometheus 指标、Request ID 和结构化日志
 - 多平台归档、校验和、SBOM 与 GHCR 容器镜像
 
@@ -236,7 +237,7 @@ ghcr.io/greygung/grokbuild-proxy-sso-import
 | `upstream.*` | Grok CLI 上游地址与客户端请求头 |
 | `oauth.*` | xAI OAuth Issuer、Client、Scope 和回调 |
 | `anthropic.model_aliases` | Claude 模型到 Grok 模型的映射 |
-| `lb.*` | 凭据选择、会话粘滞、刷新和冷却策略 |
+| `lb.*` | 凭据选择、`max_attempts`、会话粘滞、在途均衡、刷新和冷却策略 |
 | `proxy.*` | 默认出站代理模式和 URL；Admin 运行时设置可覆盖 |
 | `sso_converter.*` | 可选 SSO 转换服务地址、密钥和边界 |
 | `inspection.*` | 定时巡检、并发、熔断和延迟清理策略 |

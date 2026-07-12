@@ -78,7 +78,7 @@ flowchart TD
 | `internal/anthropic` | Messages request/response/SSE translation |
 | `internal/openai` | Responses sanitization and Chat Completions adaptation |
 | `internal/proxy` | Credential selection, token acquisition, retries, failover |
-| `internal/lb` | Priority round-robin, sticky sessions, cooldown state |
+| `internal/lb` | Priority selection, sticky sessions, least-inflight tie-break, cooldown state |
 | `internal/auth` | OAuth discovery, device flow, import, refresh |
 | `internal/importer` | Bounded asynchronous multi-format credential imports |
 | `internal/inspection` | Scheduled/manual validation, quarantine, delayed cleanup |
@@ -162,15 +162,20 @@ priority, enabled state, and persisted health.
 
 The request path:
 
-1. Select a usable credential using sticky priority round-robin.
-2. Reuse a non-expired access token.
-3. If needed, refresh through a per-credential `singleflight`.
-4. Persist both the new access token and rotated refresh token atomically.
-5. Send the upstream request.
-6. Mark success or apply failure cooldown.
+1. Snapshot a lightweight candidate pool once (id, enabled, priority, cooldown).
+2. Select a usable credential using sticky session binding when present; otherwise
+   pick by priority, then least in-flight load, then round-robin.
+3. Load the full selected credential and reuse a non-expired access token.
+4. If needed, refresh through a per-credential `singleflight`.
+5. Persist both the new access token and rotated refresh token atomically.
+6. Send the upstream request.
+7. Release in-flight occupancy; mark success or apply failure cooldown.
+8. Retryable failures may try additional credentials up to `lb.max_attempts`
+   (default 3, max 20) before the response body is delivered.
 
 HTTP 402 and 429 can fail over before a response body is sent. Credential health
-survives process restarts.
+survives process restarts. Quota exhaustion discovered by inspection uses the
+maximum cooldown and is not treated as OAuth failure.
 
 OAuth refresh is currently request-driven; there is no background pre-refresh
 scheduler.
@@ -186,12 +191,17 @@ discovery, device-code, and token endpoints are revalidated before secrets are
 sent. Test-only endpoint overrides require an explicit unsafe test flag.
 
 The inspector probes each credential through that credential's resolved route.
-A 401 is refreshed and re-probed; quarantine requires both repeated 401 evidence
-and a terminal refresh failure. A successful refresh followed by another 401 is
-retained for later inspection rather than deleted. A 429 only enters cooldown;
-network, proxy, 402/403/407, and 5xx failures are retained. Automatic physical
-deletion is disabled by default and, when enabled, requires an expired retention
-period, an unchanged token fingerprint, and a fresh terminal-auth confirmation.
+It validates `/models` first, then the weekly-credit endpoint. A 401 is refreshed
+and re-probed; quarantine requires both repeated 401 evidence and a terminal
+refresh failure. A successful refresh followed by another 401 is retained for
+later inspection rather than deleted. A 429 only enters ordinary cooldown. A
+reported weekly usage of 100% or an HTTP 402 is recorded as `quota_exhausted`
+with the configured maximum cooldown and never quarantines or deletes the
+account. Network, proxy, 403/407, and 5xx failures are retained; billing probe
+transport errors do not downgrade an otherwise healthy credential. Automatic
+physical deletion is disabled by default and, when enabled, requires an expired
+retention period, an unchanged token fingerprint, and a fresh terminal-auth
+confirmation.
 
 ## Outbound routing
 
