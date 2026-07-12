@@ -13,9 +13,11 @@
     credentialQuery: "",
     credentialStatus: "all",
     credentialPage: 1,
+    credentialPageSize: 24,
     credentialPagination: null,
     credentialPool: null,
     credentialSearchTimer: null,
+    credentialLoadSequence: 0,
     busy: false,
   };
 
@@ -296,23 +298,40 @@
     clear(list);
     clear($("credential-pagination"));
     show(empty, false);
+    if (state.credentialSearchTimer) {
+      clearTimeout(state.credentialSearchTimer);
+      state.credentialSearchTimer = null;
+    }
+    var sequence = ++state.credentialLoadSequence;
+    list.setAttribute("aria-busy", "true");
+    list.appendChild(el("div", "credential-loading", "正在加载账号…"));
     var query = (state.credentialQuery || "").trim();
     var path =
       "/admin/credentials?page=" + encodeURIComponent(state.credentialPage || 1) +
-      "&page_size=24&status=" + encodeURIComponent(state.credentialStatus || "all") +
+      "&page_size=" + encodeURIComponent(state.credentialPageSize || 24) +
+      "&status=" + encodeURIComponent(state.credentialStatus || "all") +
       "&q=" + encodeURIComponent(query);
     api("GET", path)
       .then(function (data) {
+        if (sequence !== state.credentialLoadSequence) return;
         state.credentials = (data && data.credentials) || [];
         state.credentialPagination = (data && data.pagination) || null;
         state.credentialPool = (data && data.pool) || null;
         if (state.credentialPagination && state.credentialPagination.page) {
           state.credentialPage = Number(state.credentialPagination.page) || 1;
         }
+        if (state.credentialPagination && state.credentialPagination.page_size) {
+          state.credentialPageSize = Number(state.credentialPagination.page_size) || 24;
+        }
         renderCredentialList();
       })
       .catch(function (err) {
+        if (sequence !== state.credentialLoadSequence) return;
+        clear(list);
         toast("加载凭证失败: " + err.message, "err");
+      })
+      .finally(function () {
+        if (sequence === state.credentialLoadSequence) list.removeAttribute("aria-busy");
       });
   }
 
@@ -343,9 +362,11 @@
       $("credential-pool-summary"),
       "共 " + num(pool.total) + " 个账号，" + num(pool.available) + " 个可用，" + num(pool.cooling) + " 个冷却中；显示 " + start + "-" + end + " / " + total
     );
+    var cards = document.createDocumentFragment();
     credentials.forEach(function (c) {
-      list.appendChild(renderCredentialCard(c));
+      cards.appendChild(renderCredentialCard(c));
     });
+    list.appendChild(cards);
     renderCredentialPagination(pagination);
   }
 
@@ -370,8 +391,24 @@
       state.credentialPage = page + 1;
       loadCredentials();
     });
+    var jump = el("input");
+    jump.type = "number";
+    jump.min = "1";
+    jump.max = String(totalPages);
+    jump.value = String(page);
+    jump.setAttribute("aria-label", "跳转页码");
+    jump.addEventListener("change", function () {
+      var target = Math.max(1, Math.min(totalPages, parseInt(jump.value, 10) || page));
+      if (target !== page) {
+        state.credentialPage = target;
+        loadCredentials();
+      } else {
+        jump.value = String(page);
+      }
+    });
     host.appendChild(previous);
-    host.appendChild(el("span", "muted", "第 " + page + " / " + totalPages + " 页"));
+    host.appendChild(jump);
+    host.appendChild(el("span", "muted", "/ " + totalPages + " 页"));
     host.appendChild(next);
   }
 
@@ -1620,6 +1657,15 @@
     if (credentialStatus) {
       credentialStatus.addEventListener("change", function () {
         state.credentialStatus = credentialStatus.value || "all";
+        state.credentialPage = 1;
+        loadCredentials();
+      });
+    }
+
+    var credentialPageSize = $("credential-page-size");
+    if (credentialPageSize) {
+      credentialPageSize.addEventListener("change", function () {
+        state.credentialPageSize = Number(credentialPageSize.value) || 24;
         state.credentialPage = 1;
         loadCredentials();
       });

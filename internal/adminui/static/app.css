@@ -370,7 +370,15 @@ textarea {
   width: 132px;
 }
 
+.credential-page-size {
+  width: 88px;
+}
+
 .credential-status select {
+  padding: 10px 12px;
+}
+
+.credential-page-size select {
   padding: 10px 12px;
 }
 
@@ -386,6 +394,20 @@ textarea {
   gap: 10px;
   min-height: 34px;
   margin-top: 18px;
+}
+
+.credential-pagination input {
+  width: 72px;
+  min-height: 30px;
+  padding: 4px 8px;
+  text-align: center;
+}
+
+.credential-loading {
+  grid-column: 1 / -1;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
 }
 
 /* Credential card */

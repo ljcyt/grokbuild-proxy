@@ -67,7 +67,9 @@ func TestCredentialListUsesPaginationWithoutBillingFanout(t *testing.T) {
 	for _, marker := range []string{
 		"function renderCredentialList()",
 		"function renderCredentialPagination(pagination)",
-		"&page_size=24&status=",
+		"credentialPageSize",
+		"credentialLoadSequence",
+		"document.createDocumentFragment()",
 		"额度在查看账单时按需加载",
 	} {
 		if !strings.Contains(source, marker) {
