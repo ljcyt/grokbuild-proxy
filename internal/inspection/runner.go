@@ -71,6 +71,7 @@ type Runner struct {
 	Settings          SettingsProvider
 	Logger            *slog.Logger
 	RateLimitCooldown time.Duration
+	QuotaCooldown     time.Duration
 	// InvalidateCredential retires any in-process refresh flight/cache before
 	// and after automatic deletion. It is intentionally optional for tests and
 	// alternative stores.
@@ -270,7 +271,7 @@ func (r *Runner) RunOnce(ctx context.Context) (Summary, error) {
 			summary.Healthy++
 		case "unauthorized":
 			summary.Unauthorized++
-		case "rate_limited":
+		case "rate_limited", "quota_exhausted":
 			summary.RateLimited++
 		case "state_changed", "settings_changed":
 			summary.Skipped++
@@ -331,11 +332,14 @@ func (r *Runner) RunOnce(ctx context.Context) (Summary, error) {
 				}
 				heldAction = "quarantine_held"
 			}
-		case "rate_limited":
+		case "rate_limited", "quota_exhausted":
 			action.Kind = storage.InspectionActionFailure
-			action.Status = "rate_limited"
-			action.Message = "status 429"
+			action.Status = result.Status
+			action.Message = result.Error
 			cooldown := r.RateLimitCooldown
+			if result.Status == "quota_exhausted" && r.QuotaCooldown > 0 {
+				cooldown = r.QuotaCooldown
+			}
 			if cooldown <= 0 {
 				cooldown = time.Minute
 			}
@@ -494,6 +498,11 @@ func (r *Runner) inspectOne(ctx context.Context, credential storage.Credential, 
 	if status == http.StatusTooManyRequests {
 		result.Status = "rate_limited"
 		result.Error = "status 429"
+		return result, observed
+	}
+	if status == http.StatusPaymentRequired {
+		result.Status = "quota_exhausted"
+		result.Error = "status 402"
 		return result, observed
 	}
 	if status != http.StatusUnauthorized {

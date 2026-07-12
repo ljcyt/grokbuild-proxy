@@ -416,6 +416,28 @@ func Test429OnlyCoolsDown(t *testing.T) {
 	}
 }
 
+func Test402MarksQuotaExhaustedWithLongCooldown(t *testing.T) {
+	store := &memoryStore{credentials: map[string]storage.Credential{
+		"one": {ID: "one", Enabled: true, LifecycleState: storage.CredentialStateActive},
+	}}
+	prober := &fakeProber{steps: map[string][]probeStep{"one": {{status: http.StatusPaymentRequired}}}, refresh: map[string]error{}}
+	settings := storage.DefaultRuntimeSettings()
+	now := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)
+	runner := &Runner{
+		Store: store, Prober: prober, Settings: staticSettings{settings},
+		RateLimitCooldown: time.Minute, QuotaCooldown: time.Hour, now: func() time.Time { return now },
+	}
+	summary, err := runner.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := store.credentials["one"]
+	if summary.RateLimited != 1 || !credential.Enabled || credential.LastInspectionStatus != "quota_exhausted" ||
+		credential.CooldownUntil == nil || !credential.CooldownUntil.Equal(now.Add(time.Hour)) {
+		t.Fatalf("summary=%+v credential=%+v", summary, credential)
+	}
+}
+
 func TestRefreshSystemAndTransientErrorsNeverQuarantine(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

@@ -9,6 +9,13 @@
     route: "login",
     system: null,
     settings: null,
+    credentials: [],
+    credentialQuery: "",
+    credentialStatus: "all",
+    credentialPage: 1,
+    credentialPagination: null,
+    credentialPool: null,
+    credentialSearchTimer: null,
     busy: false,
   };
 
@@ -272,6 +279,7 @@
       unauthorized: "认证失效",
       unauthorized_unconfirmed: "待确认的认证失效",
       rate_limited: "触发限流",
+      quota_exhausted: "额度耗尽",
       mass_failure_guard: "批量异常保护",
       state_changed: "凭证已变更，结果未应用",
       settings_changed: "巡检设置已变更，结果未应用",
@@ -286,21 +294,85 @@
     var empty = $("cred-empty");
     if (!list) return;
     clear(list);
+    clear($("credential-pagination"));
     show(empty, false);
-    api("GET", "/admin/credentials")
+    var query = (state.credentialQuery || "").trim();
+    var path =
+      "/admin/credentials?page=" + encodeURIComponent(state.credentialPage || 1) +
+      "&page_size=24&status=" + encodeURIComponent(state.credentialStatus || "all") +
+      "&q=" + encodeURIComponent(query);
+    api("GET", path)
       .then(function (data) {
-        var creds = (data && data.credentials) || [];
-        if (!creds.length) {
-          show(empty, true);
-          return;
+        state.credentials = (data && data.credentials) || [];
+        state.credentialPagination = (data && data.pagination) || null;
+        state.credentialPool = (data && data.pool) || null;
+        if (state.credentialPagination && state.credentialPagination.page) {
+          state.credentialPage = Number(state.credentialPagination.page) || 1;
         }
-        creds.forEach(function (c) {
-          list.appendChild(renderCredentialCard(c));
-        });
+        renderCredentialList();
       })
       .catch(function (err) {
         toast("加载凭证失败: " + err.message, "err");
       });
+  }
+
+  function renderCredentialList() {
+    var list = $("cred-list");
+    var empty = $("cred-empty");
+    if (!list || !empty) return;
+    clear(list);
+    var credentials = state.credentials || [];
+    var pagination = state.credentialPagination || {};
+    var pool = state.credentialPool || {};
+    var total = num(pagination.total);
+    var page = Math.max(1, num(pagination.page) || 1);
+    var pageSize = Math.max(1, num(pagination.page_size) || 24);
+    var start = total ? (page - 1) * pageSize + 1 : 0;
+    var end = total ? start + credentials.length - 1 : 0;
+    show(empty, total === 0);
+    var emptyTitle = empty.querySelector("h3");
+    if (emptyTitle) {
+      setText(
+        emptyTitle,
+        total === 0 && ((state.credentialQuery || "").trim() || state.credentialStatus !== "all")
+          ? "没有匹配的账号"
+          : "暂无凭证"
+      );
+    }
+    setText(
+      $("credential-pool-summary"),
+      "共 " + num(pool.total) + " 个账号，" + num(pool.available) + " 个可用，" + num(pool.cooling) + " 个冷却中；显示 " + start + "-" + end + " / " + total
+    );
+    credentials.forEach(function (c) {
+      list.appendChild(renderCredentialCard(c));
+    });
+    renderCredentialPagination(pagination);
+  }
+
+  function renderCredentialPagination(pagination) {
+    var host = $("credential-pagination");
+    if (!host) return;
+    clear(host);
+    var totalPages = num(pagination && pagination.total_pages);
+    if (totalPages <= 1) return;
+    var page = Math.max(1, num(pagination.page) || 1);
+    var previous = el("button", "btn btn-sm", "上一页");
+    previous.type = "button";
+    previous.disabled = page <= 1;
+    previous.addEventListener("click", function () {
+      state.credentialPage = page - 1;
+      loadCredentials();
+    });
+    var next = el("button", "btn btn-sm", "下一页");
+    next.type = "button";
+    next.disabled = page >= totalPages;
+    next.addEventListener("click", function () {
+      state.credentialPage = page + 1;
+      loadCredentials();
+    });
+    host.appendChild(previous);
+    host.appendChild(el("span", "muted", "第 " + page + " / " + totalPages + " 页"));
+    host.appendChild(next);
   }
 
   function renderCredentialCard(c) {
@@ -369,11 +441,9 @@
       meta.appendChild(lineMeta("访问令牌(脱敏)", c.access_token));
     }
     var usageBox = el("div", "usage-box");
-    usageBox.appendChild(el("div", "muted", "额度加载中…"));
+    usageBox.appendChild(el("div", "muted", "额度在查看账单时按需加载"));
     meta.appendChild(usageBox);
     card.appendChild(meta);
-    // Async fill usage summary on each card (no raw JSON).
-    fillCredentialUsage(usageBox, c.id);
 
     var prioRow = el("div", "priority-row");
     prioRow.appendChild(el("span", "label", "优先级"));
@@ -596,29 +666,6 @@
     }
     reloadBtn.addEventListener("click", load);
     load();
-  }
-
-  function fillCredentialUsage(box, credId) {
-    if (!box || !credId) return;
-    api("GET", "/admin/credentials/" + encodeURIComponent(credId) + "/billing")
-      .then(function (snap) {
-        clear(box);
-        var build = (snap && snap.grok_build) || {};
-        if (!build.reported || build.shared_weekly_usage_percent == null) {
-          box.appendChild(usageBar("Grok Build", 0, "未报告", "neutral"));
-          return;
-        }
-        var pct = num(build.shared_weekly_usage_percent);
-        var label = "共享周额度已用 " + pct.toFixed(1) + "%";
-        if (build.grok_build_contribution_percent != null) {
-          label += " · Build 贡献 " + num(build.grok_build_contribution_percent).toFixed(1) + "%";
-        }
-        box.appendChild(usageBar("Grok Build", pct, label, toneFromPct(pct)));
-      })
-      .catch(function (err) {
-        clear(box);
-        box.appendChild(el("div", "error", "额度: " + (err.message || "失败")));
-      });
   }
 
   function parseUsage(snap) {
@@ -1558,6 +1605,25 @@
 
     var credRefresh = $("btn-cred-refresh-list");
     if (credRefresh) credRefresh.addEventListener("click", loadCredentials);
+
+    var credentialSearch = $("credential-search");
+    if (credentialSearch) {
+      credentialSearch.addEventListener("input", function () {
+        state.credentialQuery = credentialSearch.value || "";
+        state.credentialPage = 1;
+        if (state.credentialSearchTimer) clearTimeout(state.credentialSearchTimer);
+        state.credentialSearchTimer = setTimeout(loadCredentials, 250);
+      });
+    }
+
+    var credentialStatus = $("credential-status");
+    if (credentialStatus) {
+      credentialStatus.addEventListener("change", function () {
+        state.credentialStatus = credentialStatus.value || "all";
+        state.credentialPage = 1;
+        loadCredentials();
+      });
+    }
 
     var impDef = $("btn-import-default");
     if (impDef) impDef.addEventListener("click", importDefaultGrok);

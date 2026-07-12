@@ -62,11 +62,28 @@
               <button type="button" class="btn" id="btn-import-raw">批量导入</button>
             </div>
           </div>
+          <div class="credential-tools" aria-label="账号筛选">
+            <label class="field credential-search">
+              <span class="label">搜索账号</span>
+              <input id="credential-search" type="search" autocomplete="off" placeholder="名称、邮箱、账号 ID" />
+            </label>
+            <label class="field credential-status">
+              <span class="label">状态</span>
+              <select id="credential-status">
+                <option value="all">全部</option>
+                <option value="available">可用</option>
+                <option value="cooling">冷却中</option>
+                <option value="disabled">已禁用</option>
+              </select>
+            </label>
+            <p id="credential-pool-summary" class="muted credential-pool-summary"></p>
+          </div>
           <div id="cred-empty" class="empty card hidden">
             <h3>暂无凭证</h3>
             <p class="muted">可从本机默认路径导入，或批量上传 Grok / CPA JSON 与 SSO 文件。</p>
           </div>
           <div id="cred-list" class="card-grid"></div>
+          <nav id="credential-pagination" class="credential-pagination" aria-label="账号分页"></nav>
         </section>
 
         <section id="page-clients" class="page hidden">
@@ -145,6 +162,6 @@
     </div>
   </div>
 
-  <script src="/admin/ui/app.js?v=4" defer></script>
+  <script src="/admin/ui/app.js?v=6" defer></script>
 </body>
 </html>

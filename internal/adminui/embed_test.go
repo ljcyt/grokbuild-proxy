@@ -58,6 +58,27 @@ func TestCredentialCardsExposeInspectionResult(t *testing.T) {
 	}
 }
 
+func TestCredentialListUsesPaginationWithoutBillingFanout(t *testing.T) {
+	app, err := ReadStatic("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(app)
+	for _, marker := range []string{
+		"function renderCredentialList()",
+		"function renderCredentialPagination(pagination)",
+		"&page_size=24&status=",
+		"额度在查看账单时按需加载",
+	} {
+		if !strings.Contains(source, marker) {
+			t.Fatalf("app.js missing multi-account list marker %q", marker)
+		}
+	}
+	if strings.Contains(source, "fillCredentialUsage") {
+		t.Fatal("credential list must not fetch billing for every rendered card")
+	}
+}
+
 func TestIndexHandlerServesHTMLWithoutAuth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	rec := httptest.NewRecorder()

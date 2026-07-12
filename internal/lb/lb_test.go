@@ -112,6 +112,35 @@ func TestPick_StickyHit(t *testing.T) {
 	}
 }
 
+func TestPickPriorityRRBalancesInFlightCredentials(t *testing.T) {
+	s := New(testCfg("priority_rr"))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	creds := []storage.Credential{
+		cred("a", 100, true),
+		cred("b", 100, true),
+	}
+
+	first, err := s.Pick(creds, "", now)
+	if err != nil || first.ID != "a" {
+		t.Fatalf("first pick=%+v err=%v", first, err)
+	}
+	second, err := s.Pick(creds, "", now)
+	if err != nil || second.ID != "b" {
+		t.Fatalf("second pick=%+v err=%v", second, err)
+	}
+
+	// Completing b makes it the least-loaded account, even though the next
+	// round-robin cursor would otherwise point at a.
+	s.MarkSuccess("b", "", now)
+	third, err := s.Pick(creds, "", now)
+	if err != nil || third.ID != "b" {
+		t.Fatalf("least-loaded pick=%+v err=%v", third, err)
+	}
+
+	s.Release("a")
+	s.Release("b")
+}
+
 func TestPick_StickyRebindWhenUnavailable(t *testing.T) {
 	s := New(testCfg("priority_rr"))
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)

@@ -80,6 +80,7 @@ type AnthropicConfig struct {
 // LBConfig controls multi-credential selection and sticky sessions.
 type LBConfig struct {
 	Strategy       string         `yaml:"strategy"`
+	MaxAttempts    int            `yaml:"max_attempts"`
 	StickyTTLSec   int            `yaml:"sticky_ttl_sec"`
 	RefreshSkewSec int            `yaml:"refresh_skew_sec"`
 	Cooldown       CooldownConfig `yaml:"cooldown"`
@@ -192,6 +193,7 @@ func Default() Config {
 		},
 		LB: LBConfig{
 			Strategy:       "priority_rr",
+			MaxAttempts:    3,
 			StickyTTLSec:   3600,
 			RefreshSkewSec: 180,
 			Cooldown: CooldownConfig{
@@ -315,6 +317,9 @@ func (c Config) Validate() error {
 	}
 	if c.LB.Strategy != "priority_rr" && c.LB.Strategy != "round_robin" {
 		return fmt.Errorf("lb.strategy must be priority_rr or round_robin, got %q", c.LB.Strategy)
+	}
+	if c.LB.MaxAttempts < 1 || c.LB.MaxAttempts > 20 {
+		return fmt.Errorf("lb.max_attempts must be between 1 and 20")
 	}
 	if c.LB.StickyTTLSec < 0 {
 		return fmt.Errorf("lb.sticky_ttl_sec must be >= 0")

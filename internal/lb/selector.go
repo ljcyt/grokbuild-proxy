@@ -51,6 +51,7 @@ type Selector struct {
 	stickySlots  []string
 	stickyCursor int
 	states       map[string]*runtimeState
+	inFlight     map[string]int
 	store        healthStore
 }
 
@@ -85,6 +86,7 @@ func New(cfg config.LBConfig) *Selector {
 		priorityRR:   make(map[int]int),
 		sticky:       make(map[string]stickyBinding),
 		states:       make(map[string]*runtimeState),
+		inFlight:     make(map[string]int),
 	}
 }
 
@@ -119,6 +121,7 @@ func (s *Selector) Pick(creds []storage.Credential, stickyKey string, now time.T
 	if stickyKey != "" {
 		if id, ok := s.getSticky(stickyKey, now); ok {
 			if c, found := findByID(avail, id); found {
+				s.reserveLocked(c.ID)
 				return c, nil
 			}
 			// Bound credential no longer available — fall through and rebind.
@@ -132,6 +135,7 @@ func (s *Selector) Pick(creds []storage.Credential, stickyKey string, now time.T
 	if stickyKey != "" {
 		s.bindSticky(stickyKey, picked.ID, now)
 	}
+	s.reserveLocked(picked.ID)
 	return picked, nil
 }
 
@@ -141,6 +145,7 @@ func (s *Selector) MarkSuccess(credID, stickyKey string, now time.Time) {
 		return
 	}
 	s.mu.Lock()
+	s.releaseLocked(credID)
 	st := s.ensureState(credID)
 	needsPersist := st.FailureCount != 0 ||
 		!st.CooldownUntil.IsZero() ||
@@ -179,6 +184,7 @@ func (s *Selector) MarkFailure(credID string, status int, retryAfter time.Durati
 		return
 	}
 	s.mu.Lock()
+	s.releaseLocked(credID)
 	st := s.ensureState(credID)
 	st.FailureCount++
 	d := s.cooldownDuration(status, retryAfter, st.FailureCount-1)
@@ -208,6 +214,17 @@ func (s *Selector) MarkFailure(credID string, status int, retryAfter time.Durati
 	if store != nil {
 		s.persistHealth(store, credID, snapshot)
 	}
+}
+
+// Release completes a picked credential attempt that ended before an upstream
+// success or classified failure. It is safe to call more than once.
+func (s *Selector) Release(credID string) {
+	if credID == "" {
+		return
+	}
+	s.mu.Lock()
+	s.releaseLocked(credID)
+	s.mu.Unlock()
 }
 
 func (s *Selector) persistHealth(store healthStore, credID string, snapshot healthSnapshot) {
@@ -297,7 +314,8 @@ func (s *Selector) pickRoundRobin(avail []storage.Credential) storage.Credential
 	return avail[idx]
 }
 
-// pickPriorityRR groups by Priority desc and RR within the highest-priority group present.
+// pickPriorityRR groups by Priority desc, then balances in-flight work inside
+// the highest-priority group before using round-robin as a tie-breaker.
 // Caller must hold s.mu.
 func (s *Selector) pickPriorityRR(avail []storage.Credential) storage.Credential {
 	// Group by priority.
@@ -313,13 +331,26 @@ func (s *Selector) pickPriorityRR(avail []storage.Credential) storage.Credential
 
 	top := priorities[0]
 	group := groups[top]
-	idx := s.priorityRR[top]
-	if idx < 0 {
-		idx = 0
+	minimumInFlight := -1
+	for _, credential := range group {
+		count := s.inFlight[credential.ID]
+		if minimumInFlight < 0 || count < minimumInFlight {
+			minimumInFlight = count
+		}
 	}
-	idx = idx % len(group)
-	s.priorityRR[top] = (idx + 1) % len(group)
-	return group[idx]
+	start := s.priorityRR[top]
+	if start < 0 {
+		start = 0
+	}
+	start %= len(group)
+	for offset := 0; offset < len(group); offset++ {
+		idx := (start + offset) % len(group)
+		if s.inFlight[group[idx].ID] == minimumInFlight {
+			s.priorityRR[top] = (idx + 1) % len(group)
+			return group[idx]
+		}
+	}
+	return group[start]
 }
 
 func (s *Selector) ensureState(credID string) *runtimeState {
@@ -329,6 +360,20 @@ func (s *Selector) ensureState(credID string) *runtimeState {
 		s.states[credID] = st
 	}
 	return st
+}
+
+func (s *Selector) reserveLocked(credID string) {
+	if credID != "" {
+		s.inFlight[credID]++
+	}
+}
+
+func (s *Selector) releaseLocked(credID string) {
+	if count := s.inFlight[credID]; count > 1 {
+		s.inFlight[credID] = count - 1
+	} else {
+		delete(s.inFlight, credID)
+	}
 }
 
 func findByID(creds []storage.Credential, id string) (storage.Credential, bool) {

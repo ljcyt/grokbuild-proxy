@@ -335,6 +335,62 @@ func TestAdminCredentialsMasked(t *testing.T) {
 	}
 }
 
+func TestAdminCredentialsPaginationAndFiltering(t *testing.T) {
+	store := newFakeStore()
+	now := time.Now().UTC()
+	cooldown := now.Add(time.Hour)
+	store.creds["alpha-one"] = storage.Credential{ID: "alpha-one", Name: "Alpha One", AccessToken: "access-a", Enabled: true}
+	store.creds["alpha-two"] = storage.Credential{ID: "alpha-two", Email: "alpha@example.test", AccessToken: "access-b", Enabled: true}
+	store.creds["beta-cooling"] = storage.Credential{ID: "beta-cooling", AccessToken: "access-c", Enabled: true, CooldownUntil: &cooldown}
+	store.creds["gamma-disabled"] = storage.Credential{ID: "gamma-disabled", Enabled: false}
+	store.creds["delta"] = storage.Credential{ID: "delta", AccessToken: "access-d", Enabled: true}
+	h := &Handlers{Store: store, AdminKey: "sk-admin-test", Config: config.Default()}
+
+	request := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer sk-admin-test")
+		rr := httptest.NewRecorder()
+		h.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+
+	var page struct {
+		Credentials []map[string]any     `json:"credentials"`
+		Pool        poolSummary          `json:"pool"`
+		Pagination  credentialPagination `json:"pagination"`
+	}
+	rr := request("/admin/credentials?page=2&page_size=2")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Credentials) != 2 || page.Pagination.Page != 2 ||
+		page.Pagination.PageSize != 2 || page.Pagination.Total != 5 || page.Pagination.TotalPages != 3 {
+		t.Fatalf("unexpected page: %+v credentials=%d", page.Pagination, len(page.Credentials))
+	}
+	if page.Pool.Total != 5 || page.Pool.Available != 3 || page.Pool.Cooling != 1 || page.Pool.Disabled != 1 {
+		t.Fatalf("unexpected pool: %+v", page.Pool)
+	}
+
+	rr = request("/admin/credentials?q=alpha&status=available")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("filter status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Credentials) != 2 || page.Pagination.Total != 2 {
+		t.Fatalf("unexpected filtered page: %+v credentials=%d", page.Pagination, len(page.Credentials))
+	}
+
+	rr = request("/admin/credentials?status=unknown")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid filter status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestAdminRejectsBadKey(t *testing.T) {
 	h := &Handlers{Store: newFakeStore(), AdminKey: "sk-admin-test", Config: config.Default()}
 	req := httptest.NewRequest(http.MethodGet, "/admin/system", nil)

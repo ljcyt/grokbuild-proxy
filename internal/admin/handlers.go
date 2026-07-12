@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -257,6 +258,19 @@ func subtleConstantTimeEq(a, b string) bool {
 	return v == 0
 }
 
+const (
+	defaultCredentialPageSize = 24
+	maxCredentialPageSize     = 100
+	maxCredentialPage         = 1_000_000
+)
+
+type credentialPagination struct {
+	Page       int `json:"page"`
+	PageSize   int `json:"page_size"`
+	Total      int `json:"total"`
+	TotalPages int `json:"total_pages"`
+}
+
 // ListCredentials GET /admin/credentials
 func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 	creds, err := h.Store.ListCredentials()
@@ -264,11 +278,106 @@ func (h *Handlers) ListCredentials(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out := make([]maskedCredential, 0, len(creds))
-	for _, c := range creds {
+	page, pageSize, query, status, err := credentialListQuery(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	now := time.Now()
+	filtered := filterCredentials(creds, query, status, now)
+	totalPages := (len(filtered) + pageSize - 1) / pageSize
+	if totalPages > 0 && page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * pageSize
+	end := min(start+pageSize, len(filtered))
+	out := make([]maskedCredential, 0, end-start)
+	for _, c := range filtered[start:end] {
 		out = append(out, h.maskedCredential(c))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"credentials": out})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"credentials": out,
+		"pool":        summarizePool(creds, now),
+		"pagination": credentialPagination{
+			Page:       page,
+			PageSize:   pageSize,
+			Total:      len(filtered),
+			TotalPages: totalPages,
+		},
+	})
+}
+
+func credentialListQuery(r *http.Request) (page, pageSize int, query, status string, err error) {
+	page, err = positiveQueryInt(r, "page", 1, maxCredentialPage)
+	if err != nil {
+		return 0, 0, "", "", err
+	}
+	pageSize, err = positiveQueryInt(r, "page_size", defaultCredentialPageSize, maxCredentialPageSize)
+	if err != nil {
+		return 0, 0, "", "", err
+	}
+	query = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	if len(query) > 256 {
+		return 0, 0, "", "", fmt.Errorf("q must be at most 256 bytes")
+	}
+	status = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	switch status {
+	case "", "all", "available", "cooling", "disabled":
+		if status == "" {
+			status = "all"
+		}
+	default:
+		return 0, 0, "", "", fmt.Errorf("status must be all, available, cooling, or disabled")
+	}
+	return page, pageSize, query, status, nil
+}
+
+func positiveQueryInt(r *http.Request, name string, fallback, maximum int) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 || value > maximum {
+		return 0, fmt.Errorf("%s must be between 1 and %d", name, maximum)
+	}
+	return value, nil
+}
+
+func filterCredentials(creds []storage.Credential, query, status string, now time.Time) []storage.Credential {
+	filtered := make([]storage.Credential, 0, len(creds))
+	for _, credential := range creds {
+		cooling := credential.CooldownUntil != nil && credential.CooldownUntil.After(now)
+		switch status {
+		case "available":
+			if !credential.Enabled || cooling {
+				continue
+			}
+		case "cooling":
+			if !credential.Enabled || !cooling {
+				continue
+			}
+		case "disabled":
+			if credential.Enabled {
+				continue
+			}
+		}
+		if query != "" {
+			haystack := strings.ToLower(strings.Join([]string{
+				credential.ID,
+				credential.Name,
+				credential.Email,
+				credential.UserID,
+				credential.TeamID,
+			}, " "))
+			if !strings.Contains(haystack, query) {
+				continue
+			}
+		}
+		filtered = append(filtered, credential)
+	}
+	return filtered
 }
 
 // CreateCredential POST /admin/credentials

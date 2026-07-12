@@ -154,6 +154,10 @@ func (u *routeRecordingUpstream) GetBilling(context.Context, string) (*upstream.
 	u.record("billing")
 	return &upstream.MonthlyBilling{}, nil
 }
+func (u *routeRecordingUpstream) GetBillingCredits(context.Context, string) (*upstream.WeeklyCredits, error) {
+	u.record("billing_credits")
+	return &upstream.WeeklyCredits{}, nil
+}
 func (u *routeRecordingUpstream) GetBillingSnapshot(context.Context, string) (*upstream.BillingSnapshot, error) {
 	u.record("billing_snapshot")
 	return &upstream.BillingSnapshot{}, nil
@@ -206,7 +210,31 @@ func (postFuncUpstream) ListModels(context.Context, string) (*upstream.ModelList
 func (postFuncUpstream) GetBilling(context.Context, string) (*upstream.MonthlyBilling, error) {
 	return &upstream.MonthlyBilling{}, nil
 }
+func (postFuncUpstream) GetBillingCredits(context.Context, string) (*upstream.WeeklyCredits, error) {
+	return &upstream.WeeklyCredits{}, nil
+}
 func (postFuncUpstream) GetBillingSnapshot(context.Context, string) (*upstream.BillingSnapshot, error) {
+	return &upstream.BillingSnapshot{}, nil
+}
+
+type quotaProbeUpstream struct {
+	weekly *upstream.WeeklyCredits
+	err    error
+}
+
+func (u quotaProbeUpstream) PostResponses(context.Context, any, upstream.PostResponsesOptions) (*http.Response, error) {
+	return nil, fmt.Errorf("unexpected PostResponses")
+}
+func (u quotaProbeUpstream) ListModels(context.Context, string) (*upstream.ModelList, error) {
+	return &upstream.ModelList{}, nil
+}
+func (u quotaProbeUpstream) GetBilling(context.Context, string) (*upstream.MonthlyBilling, error) {
+	return &upstream.MonthlyBilling{}, nil
+}
+func (u quotaProbeUpstream) GetBillingCredits(context.Context, string) (*upstream.WeeklyCredits, error) {
+	return u.weekly, u.err
+}
+func (u quotaProbeUpstream) GetBillingSnapshot(context.Context, string) (*upstream.BillingSnapshot, error) {
 	return &upstream.BillingSnapshot{}, nil
 }
 
@@ -713,6 +741,20 @@ func TestExecutorPreservesFinalUpstreamError(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "all accounts limited") {
 		t.Fatalf("body=%s", raw)
+	}
+}
+
+func TestProbeCredentialTreatsExhaustedWeeklyCreditsAsUnavailable(t *testing.T) {
+	used := 100.0
+	store := newMemStore(storage.Credential{ID: "cred", AccessToken: "token", Enabled: true})
+	executor := &Executor{
+		Store:    store,
+		Selector: lb.New(config.LBConfig{Strategy: "priority_rr"}),
+		Upstream: quotaProbeUpstream{weekly: &upstream.WeeklyCredits{CreditUsagePercent: &used}},
+	}
+	status, err := executor.ProbeCredential(context.Background(), "cred")
+	if err != nil || status != http.StatusPaymentRequired {
+		t.Fatalf("status=%d err=%v", status, err)
 	}
 }
 

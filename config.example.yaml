@@ -41,6 +41,9 @@ anthropic:
   count_tokens: false
 lb:
   strategy: "priority_rr"
+  # Number of distinct accounts to try before returning a retryable upstream
+  # failure. Keep this modest to avoid amplifying a shared upstream outage.
+  max_attempts: 3
   sticky_ttl_sec: 3600
   refresh_skew_sec: 180
   cooldown:

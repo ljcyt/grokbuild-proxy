@@ -137,9 +137,10 @@ func main() {
 	selector := lb.New(cfg.LB).SetHealthStore(store)
 
 	exec := &proxy.Executor{
-		Store:    store,
-		Selector: selector,
-		Upstream: up,
+		Store:       store,
+		Selector:    selector,
+		Upstream:    up,
+		MaxAttempts: cfg.LB.MaxAttempts,
 		UpstreamFor: func(credential storage.Credential) (proxy.Upstream, error) {
 			httpClient, _, err := outboundFactory.ClientFor(&credential, 0)
 			if err != nil {
@@ -181,6 +182,7 @@ func main() {
 		Settings:             settingsManager,
 		Logger:               logger,
 		RateLimitCooldown:    time.Duration(cfg.LB.Cooldown.BaseSec) * time.Second,
+		QuotaCooldown:        time.Duration(cfg.LB.Cooldown.MaxSec) * time.Second,
 		InvalidateCredential: refresher.Invalidate,
 	}
 	inspectionCtx, stopInspection := context.WithCancel(context.Background())

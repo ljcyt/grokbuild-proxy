@@ -88,6 +88,19 @@ Keep `sso_converter.max_batch` at or below 100 and `timeout_sec` at or below
 300 seconds. x.ai responses are capped at 1 MiB, and item deadlines
 cooperatively stop semaphore waits, retries, backoff, and polling.
 
+## Multi-account failover
+
+`lb.max_attempts` limits how many distinct credentials one request may try
+after a retryable upstream failure. The default is 3 and the accepted range is
+1 through 20. Increase it only when the account pool is independent enough to
+justify the extra latency and upstream requests during an outage; it is not a
+quota-bypass setting. The Admin credential list filters accounts locally and
+loads billing only when an operator selects **Billing**, so opening a large
+pool does not fan out one upstream billing request per account. The credential
+list is server-paginated: `page`, `page_size` (1-100), `q`, and `status`
+(`all`, `available`, `cooling`, or `disabled`) are accepted by
+`GET /admin/credentials`; the Admin UI requests 24 accounts per page.
+
 ## Proxy changes
 
 Global proxy settings can be changed in Admin. Credential `direct` or URL mode
@@ -106,6 +119,14 @@ mass-failure guard. Quarantine requires repeated 401 probes plus a terminal
 refresh failure; a successful refresh followed by another 401 is retained for
 later inspection. A 429 only sets cooldown, and transport/5xx errors are
 retained. Manual disables are never automatically reversed.
+
+The selector keeps an in-memory count of in-flight requests and, within the
+same priority, selects the least-loaded credential before round-robin tie
+breaking. A probe validates both `/models` and the weekly-credit endpoint. A
+reported usage of 100%, or an HTTP 402 response, is recorded as
+`quota_exhausted` and uses the configured maximum cooldown; this avoids
+repeatedly selecting an authenticated account whose upstream quota is
+unavailable. HTTP 402 and 429 never quarantine or delete credentials.
 
 Keep `inspection.purge_after_sec: 0` unless physical deletion is explicitly
 required. When enabled, cleanup occurs only after the retention deadline, an

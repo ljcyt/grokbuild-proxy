@@ -43,11 +43,16 @@ type Selector interface {
 	MarkFailure(credID string, status int, retryAfter time.Duration, now time.Time)
 }
 
+type selectorReleaser interface {
+	Release(credID string)
+}
+
 // Upstream is the subset of upstream.Client used by the executor.
 type Upstream interface {
 	PostResponses(ctx context.Context, body any, opts upstream.PostResponsesOptions) (*http.Response, error)
 	ListModels(ctx context.Context, accessToken string) (*upstream.ModelList, error)
 	GetBilling(ctx context.Context, accessToken string) (*upstream.MonthlyBilling, error)
+	GetBillingCredits(ctx context.Context, accessToken string) (*upstream.WeeklyCredits, error)
 	GetBillingSnapshot(ctx context.Context, accessToken string) (*upstream.BillingSnapshot, error)
 }
 
@@ -140,6 +145,24 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			return nil, err
 		}
 		tried[cred.ID] = struct{}{}
+		selectionCompleted := false
+		releaseSelection := func() {
+			if selectionCompleted {
+				return
+			}
+			if releaser, ok := e.Selector.(selectorReleaser); ok {
+				releaser.Release(cred.ID)
+			}
+			selectionCompleted = true
+		}
+		markSuccess := func() {
+			e.Selector.MarkSuccess(cred.ID, convID, e.now())
+			selectionCompleted = true
+		}
+		markFailure := func(status int, retryAfter time.Duration) {
+			e.Selector.MarkFailure(cred.ID, status, retryAfter, e.now())
+			selectionCompleted = true
+		}
 		e.log(ctx, slog.LevelDebug, "credential_selected",
 			"credential_id", cred.ID,
 			"attempt", attempt+1,
@@ -157,6 +180,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			// caller's view. Retry selection without penalizing the credential; the
 			// successful rotation, if any, has already been CAS-persisted.
 			if errors.Is(err, auth.ErrRefreshInvalidated) {
+				releaseSelection()
 				delete(tried, cred.ID)
 				continue
 			}
@@ -165,11 +189,12 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			if latest, gerr := e.Store.GetCredential(cred.ID); gerr == nil {
 				if strings.TrimSpace(latest.RefreshToken) != "" &&
 					strings.TrimSpace(latest.RefreshToken) != strings.TrimSpace(cred.RefreshToken) {
+					releaseSelection()
 					delete(tried, cred.ID)
 					continue
 				}
 			}
-			e.Selector.MarkFailure(cred.ID, http.StatusUnauthorized, 0, e.now())
+			markFailure(http.StatusUnauthorized, 0)
 			continue
 		}
 		// Bind the request to one durable token/revision snapshot. If an import or
@@ -178,6 +203,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 		latest, gerr := e.Store.GetCredential(cred.ID)
 		if gerr != nil {
 			lastErr = gerr
+			releaseSelection()
 			continue
 		}
 		if !latest.Enabled || latest.ManualDisabled || !tokenMatchesCredential(tokens, latest) {
@@ -185,6 +211,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			if latest.Enabled && !latest.ManualDisabled {
 				delete(tried, cred.ID)
 			}
+			releaseSelection()
 			continue
 		}
 		cred = latest
@@ -192,7 +219,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 		selectedUpstream, err := e.upstreamFor(cred)
 		if err != nil {
 			lastErr = err
-			e.Selector.MarkFailure(cred.ID, 0, 0, e.now())
+			markFailure(0, 0)
 			continue
 		}
 		selectedRouteRevision := e.routeRevision()
@@ -205,6 +232,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			if verr == nil && verifiedCredential.Enabled && !verifiedCredential.ManualDisabled {
 				delete(tried, cred.ID)
 			}
+			releaseSelection()
 			continue
 		}
 		cred = verifiedCredential
@@ -222,12 +250,13 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				"attempt", attempt+1,
 				"error", err,
 			)
-			e.Selector.MarkFailure(cred.ID, 0, 0, e.now())
+			markFailure(0, 0)
 			continue
 		}
 
 		// 426: do not failover; return original response (or typed error if nil).
 		if resp.StatusCode == http.StatusUpgradeRequired {
+			releaseSelection()
 			return resp, nil
 		}
 
@@ -238,7 +267,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				"attempt", attempt+1,
 				"upstream_status", resp.StatusCode,
 			)
-			e.Selector.MarkSuccess(cred.ID, convID, e.now())
+			markSuccess()
 			_ = e.touchLastUsed(cred)
 			return resp, nil
 		}
@@ -250,6 +279,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			if gerr != nil {
 				lastErr = gerr
 				lastResp = unauthorizedResp
+				releaseSelection()
 				continue
 			}
 			// A completed disable/quarantine or credential/global route mutation
@@ -262,6 +292,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				if latest.Enabled && !latest.ManualDisabled {
 					delete(tried, cred.ID)
 				}
+				releaseSelection()
 				continue
 			}
 			refreshed, rerr := e.forceRefresh(ctx, latest)
@@ -269,10 +300,11 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				lastErr = rerr
 				lastResp = unauthorizedResp
 				if errors.Is(rerr, auth.ErrRefreshInvalidated) {
+					releaseSelection()
 					delete(tried, cred.ID)
 					continue
 				}
-				e.Selector.MarkFailure(cred.ID, http.StatusUnauthorized, 0, e.now())
+				markFailure(http.StatusUnauthorized, 0)
 				continue
 			}
 			// Refresh persistence increments the credential revision. Reload both
@@ -286,6 +318,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				if gerr == nil && retryCredential.Enabled && !retryCredential.ManualDisabled {
 					delete(tried, cred.ID)
 				}
+				releaseSelection()
 				continue
 			}
 			retryRouteRevision := e.routeRevision()
@@ -293,6 +326,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			if uerr != nil {
 				lastErr = uerr
 				lastResp = unauthorizedResp
+				releaseSelection()
 				continue
 			}
 			verifiedCredential, verr := e.Store.GetCredential(cred.ID)
@@ -305,6 +339,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				if verr == nil && verifiedCredential.Enabled && !verifiedCredential.ManualDisabled {
 					delete(tried, cred.ID)
 				}
+				releaseSelection()
 				continue
 			}
 			retry, rerr := retryUpstream.PostResponses(ctx, body, upstream.PostResponsesOptions{
@@ -316,22 +351,23 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			})
 			if rerr != nil {
 				lastErr = rerr
-				e.Selector.MarkFailure(cred.ID, http.StatusUnauthorized, 0, e.now())
+				markFailure(http.StatusUnauthorized, 0)
 				continue
 			}
 			if retry.StatusCode >= 200 && retry.StatusCode < 300 {
-				e.Selector.MarkSuccess(cred.ID, convID, e.now())
+				markSuccess()
 				_ = e.touchLastUsed(cred)
 				return retry, nil
 			}
 			if retry.StatusCode == http.StatusUpgradeRequired {
+				releaseSelection()
 				return retry, nil
 			}
 			// Still failing after refresh → mark and switch credentials.
 			ra := parseRetryAfterAt(retry.Header.Get("Retry-After"), e.now())
 			status := retry.StatusCode
 			lastResp = bufferErrorResponse(retry)
-			e.Selector.MarkFailure(cred.ID, status, ra, e.now())
+			markFailure(status, ra)
 			e.log(ctx, slog.LevelWarn, "upstream_retryable_status",
 				"credential_id", cred.ID,
 				"attempt", attempt+1,
@@ -347,7 +383,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			ra := parseRetryAfterAt(resp.Header.Get("Retry-After"), e.now())
 			status := resp.StatusCode
 			lastResp = bufferErrorResponse(resp)
-			e.Selector.MarkFailure(cred.ID, status, ra, e.now())
+			markFailure(status, ra)
 			e.log(ctx, slog.LevelWarn, "upstream_retryable_status",
 				"credential_id", cred.ID,
 				"attempt", attempt+1,
@@ -359,6 +395,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 		}
 
 		// Non-retryable error: return as-is for the handler to map.
+		releaseSelection()
 		return resp, nil
 	}
 
@@ -496,15 +533,36 @@ func (e *Executor) ListModels(ctx context.Context) (*upstream.ModelList, error) 
 			return nil, err
 		}
 		tried[credential.ID] = struct{}{}
+		selectionCompleted := false
+		releaseSelection := func() {
+			if selectionCompleted {
+				return
+			}
+			if releaser, ok := e.Selector.(selectorReleaser); ok {
+				releaser.Release(credential.ID)
+			}
+			selectionCompleted = true
+		}
+		markSuccess := func() {
+			e.Selector.MarkSuccess(credential.ID, "", e.now())
+			selectionCompleted = true
+		}
+		markFailure := func(status int) {
+			e.Selector.MarkFailure(credential.ID, status, 0, e.now())
+			selectionCompleted = true
+		}
 		tokens, durable, err := e.ensureDurableCredential(ctx, credential, true)
 		if err != nil {
 			lastErr = err
 			if errors.Is(err, auth.ErrRefreshInvalidated) {
+				releaseSelection()
 				delete(tried, credential.ID)
 				continue
 			}
 			if status := auth.StatusCode(err); shouldMarkDiscoveryFailure(status) {
-				e.Selector.MarkFailure(credential.ID, status, 0, e.now())
+				markFailure(status)
+			} else {
+				releaseSelection()
 			}
 			continue
 		}
@@ -512,20 +570,24 @@ func (e *Executor) ListModels(ctx context.Context) (*upstream.ModelList, error) 
 		if err != nil {
 			lastErr = err
 			if errors.Is(err, auth.ErrRefreshInvalidated) {
+				releaseSelection()
 				delete(tried, credential.ID)
 				continue
 			}
+			releaseSelection()
 			continue
 		}
 		models, err := client.ListModels(ctx, verified.AccessToken)
 		if err != nil {
 			lastErr = err
 			if status := upstream.StatusCode(err); shouldMarkDiscoveryFailure(status) {
-				e.Selector.MarkFailure(credential.ID, status, 0, e.now())
+				markFailure(status)
+			} else {
+				releaseSelection()
 			}
 			continue
 		}
-		e.Selector.MarkSuccess(credential.ID, "", e.now())
+		markSuccess()
 		_ = e.touchLastUsed(verified)
 		return models, nil
 	}
@@ -572,6 +634,9 @@ func (e *Executor) ProbeCredential(ctx context.Context, credID string) (int, err
 	if _, err := client.ListModels(ctx, tokens.AccessToken); err != nil {
 		return upstream.StatusCode(err), err
 	}
+	if exhausted, status, err := probeQuotaAvailability(ctx, client, tokens.AccessToken); exhausted || status != 0 {
+		return status, err
+	}
 	return http.StatusOK, nil
 }
 
@@ -615,7 +680,30 @@ func (e *Executor) ProbeCredentialSnapshot(ctx context.Context, credential stora
 	if _, err := client.ListModels(ctx, verified.AccessToken); err != nil {
 		return upstream.StatusCode(err), verified, err
 	}
+	if exhausted, status, err := probeQuotaAvailability(ctx, client, verified.AccessToken); exhausted || status != 0 {
+		return status, verified, err
+	}
 	return http.StatusOK, verified, nil
+}
+
+// probeQuotaAvailability adds quota awareness to the inexpensive model probe.
+// An unavailable billing endpoint is ignored unless it gives a credential or
+// quota status, so an upstream billing outage cannot evict healthy accounts.
+func probeQuotaAvailability(ctx context.Context, client Upstream, accessToken string) (exhausted bool, status int, err error) {
+	weekly, err := client.GetBillingCredits(ctx, accessToken)
+	if err != nil {
+		status = upstream.StatusCode(err)
+		switch status {
+		case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+			return false, status, err
+		default:
+			return false, 0, nil
+		}
+	}
+	if weekly != nil && weekly.CreditUsagePercent != nil && *weekly.CreditUsagePercent >= 100 {
+		return true, http.StatusPaymentRequired, nil
+	}
+	return false, 0, nil
 }
 
 func (e *Executor) ensureDurableCredential(ctx context.Context, credential storage.Credential, requireEnabled bool) (auth.TokenSet, storage.Credential, error) {
