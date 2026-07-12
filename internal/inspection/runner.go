@@ -135,13 +135,45 @@ func (r *Runner) RunOnce(ctx context.Context) (Summary, error) {
 	if r == nil || r.Store == nil || r.Prober == nil {
 		return Summary{}, fmt.Errorf("inspection: runner is not configured")
 	}
+	if err := r.beginRun(); err != nil {
+		return Summary{}, err
+	}
+	return r.runOnce(ctx)
+}
+
+// Start launches one inspection in the background. It is intended for the
+// Admin action so a large credential pool is not constrained by the HTTP
+// request deadline. Progress and the final summary remain available to callers.
+func (r *Runner) Start(ctx context.Context) error {
+	if r == nil || r.Store == nil || r.Prober == nil {
+		return fmt.Errorf("inspection: runner is not configured")
+	}
+	if err := r.beginRun(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
+		if _, err := r.runOnce(ctx); err != nil && r.Logger != nil {
+			r.Logger.Warn("credential_inspection_failed", "error", err)
+		}
+	}()
+	return nil
+}
+
+func (r *Runner) beginRun() error {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.running {
-		r.mu.Unlock()
-		return Summary{}, fmt.Errorf("inspection: run already in progress")
+		return fmt.Errorf("inspection: run already in progress")
 	}
 	r.running = true
-	r.mu.Unlock()
+	r.progress = nil
+	return nil
+}
+
+func (r *Runner) runOnce(ctx context.Context) (Summary, error) {
 	defer func() {
 		r.mu.Lock()
 		r.running = false

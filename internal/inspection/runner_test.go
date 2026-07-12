@@ -524,6 +524,35 @@ func TestRunOnceRejectsOverlap(t *testing.T) {
 	}
 }
 
+func TestStartRunsInspectionInBackground(t *testing.T) {
+	store := &memoryStore{credentials: map[string]storage.Credential{
+		"one": {ID: "one", Enabled: true, LifecycleState: storage.CredentialStateActive},
+	}}
+	prober := &blockingProber{started: make(chan struct{}), release: make(chan struct{})}
+	runner := &Runner{Store: store, Prober: prober, Settings: staticSettings{storage.DefaultRuntimeSettings()}}
+	if err := runner.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-prober.started
+	if !runner.Running() {
+		t.Fatal("background inspection is not marked running")
+	}
+	if err := runner.Start(context.Background()); err == nil {
+		t.Fatal("overlapping background inspection was accepted")
+	}
+	close(prober.release)
+	deadline := time.Now().Add(time.Second)
+	for runner.Running() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if runner.Running() {
+		t.Fatal("background inspection did not complete")
+	}
+	if _, ok := runner.Last(); !ok {
+		t.Fatal("background inspection did not retain a summary")
+	}
+}
+
 func TestManualDisabledCredentialIsNeverInspectedOrReactivated(t *testing.T) {
 	credential := storage.Credential{
 		ID: "manual", Enabled: false, ManualDisabled: true,

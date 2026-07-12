@@ -75,6 +75,10 @@ type InspectionService interface {
 	Running() bool
 }
 
+type asyncInspectionService interface {
+	Start(ctx context.Context) error
+}
+
 // TokenService refreshes credentials and fetches billing.
 type TokenService interface {
 	ForceRefreshToken(ctx context.Context, credID string) (auth.TokenSet, storage.Credential, error)
@@ -1010,6 +1014,18 @@ func (h *Handlers) InspectionStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) RunInspection(w http.ResponseWriter, r *http.Request) {
 	if h.Inspection == nil {
 		writeErr(w, http.StatusServiceUnavailable, "credential inspection unavailable")
+		return
+	}
+	if starter, ok := h.Inspection.(asyncInspectionService); ok {
+		if err := starter.Start(context.Background()); err != nil {
+			if strings.Contains(err.Error(), "already in progress") {
+				writeErr(w, http.StatusConflict, err.Error())
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
 		return
 	}
 	summary, err := h.Inspection.RunOnce(r.Context())

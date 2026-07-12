@@ -1442,6 +1442,11 @@
       setText(inspectionStatus, "正在巡检，请稍候…");
       api("POST", "/admin/inspection/run")
         .then(function (summary) {
+          if (summary && summary.started) {
+            setText(inspectionStatus, "巡检已启动，正在获取进度…");
+            refreshInspectionStatus();
+            return;
+          }
           setText(
             inspectionStatus,
             showInspectionSummary("巡检完成：", summary)
