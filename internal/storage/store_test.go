@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -248,7 +249,7 @@ func TestClientKeyCRUDAndHashOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("clients.json mode: %o", info.Mode().Perm())
 	}
 
@@ -320,7 +321,7 @@ func TestEnsureBootstrapKeysGenerate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("meta.json missing: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("meta.json mode: %o", info.Mode().Perm())
 	}
 
@@ -526,7 +527,7 @@ func TestEnsureBootstrapKeysConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("credentials.json mode: %o", info.Mode().Perm())
 	}
 }
@@ -538,24 +539,30 @@ func TestAtomicWriteAndDirMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	info, err := os.Stat(dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
 		t.Fatalf("data dir mode: %o", info.Mode().Perm())
 	}
 	_ = s
 }
 
 func TestNewDoesNotChmodExistingDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix directory permission bits")
+	}
 	dir := filepath.Join(t.TempDir(), "existing")
 	if err := os.Mkdir(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(dir); err != nil {
+	s, err := New(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	info, err := os.Stat(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -927,6 +934,9 @@ func TestCredentialWritesRejectUntrustedIssuer(t *testing.T) {
 }
 
 func TestBulkUpsertStorageFailureLeavesExistingDocumentUnchanged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ACLs do not make a directory unwritable via os.Chmod")
+	}
 	s := newTestStore(t)
 	if _, _, err := s.UpsertCredential(CreateCredentialInput{
 		UserID: "existing", AccessToken: "access-existing", RefreshToken: "refresh-existing",
@@ -1212,7 +1222,7 @@ func TestRuntimeSettingsRoundTrip(t *testing.T) {
 		t.Fatalf("reloaded=%+v", reloaded)
 	}
 	info, err := os.Stat(filepath.Join(s.DataDir(), settingsFile))
-	if err != nil || info.Mode().Perm() != 0o600 {
+	if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("settings mode=%v err=%v", info.Mode().Perm(), err)
 	}
 }
