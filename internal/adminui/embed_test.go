@@ -81,6 +81,28 @@ func TestCredentialListUsesPaginationWithoutBillingFanout(t *testing.T) {
 	}
 }
 
+func TestAdminThemeUsesCompactGrayPalette(t *testing.T) {
+	css, err := ReadStatic("app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(css)
+	for _, marker := range []string{
+		"--bg: #242424",
+		"--bg-elev: #2b2b2b",
+		"--ghost: #3a3a3a",
+		"--primary: #3d7be0",
+		"background: var(--primary-hover)",
+	} {
+		if !strings.Contains(source, marker) {
+			t.Fatalf("app.css missing compact theme marker %q", marker)
+		}
+	}
+	if strings.Contains(source, "gradient(") {
+		t.Fatal("admin theme should not use gradients")
+	}
+}
+
 func TestIndexHandlerServesHTMLWithoutAuth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	rec := httptest.NewRecorder()
