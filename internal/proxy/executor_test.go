@@ -22,10 +22,11 @@ import (
 )
 
 type memStore struct {
-	mu      sync.Mutex
-	creds   map[string]storage.Credential
-	patches int
-	gets    int
+	mu         sync.Mutex
+	creds      map[string]storage.Credential
+	patches    int
+	gets       int
+	candidates int
 }
 
 func newMemStore(creds ...storage.Credential) *memStore {
@@ -42,6 +43,19 @@ func (m *memStore) ListCredentials() ([]storage.Credential, error) {
 	out := make([]storage.Credential, 0, len(m.creds))
 	for _, c := range m.creds {
 		out = append(out, c)
+	}
+	return out, nil
+}
+
+func (m *memStore) ListCredentialCandidates() ([]storage.Credential, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.candidates++
+	out := make([]storage.Credential, 0, len(m.creds))
+	for _, c := range m.creds {
+		out = append(out, storage.Credential{
+			ID: c.ID, Enabled: c.Enabled, Priority: c.Priority, CooldownUntil: c.CooldownUntil,
+		})
 	}
 	return out, nil
 }
@@ -678,6 +692,12 @@ func TestExecutorPostFailoverOn429(t *testing.T) {
 	}
 	if keys["Bearer token-a"] == "" || keys["Bearer token-a"] != keys["Bearer token-b"] {
 		t.Fatalf("attempts must share an idempotency key: %v", keys)
+	}
+	store.mu.Lock()
+	candidateCalls := store.candidates
+	store.mu.Unlock()
+	if candidateCalls != 1 {
+		t.Fatalf("candidate list calls=%d want 1", candidateCalls)
 	}
 }
 

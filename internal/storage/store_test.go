@@ -46,6 +46,14 @@ func TestCredentialCRUD(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("list len: %d", len(list))
 	}
+	candidates, err := s.ListCredentialCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != created.ID || !candidates[0].Enabled ||
+		candidates[0].AccessToken != "" || candidates[0].RefreshToken != "" || candidates[0].Billing != nil {
+		t.Fatalf("candidate leaked non-selection fields: %+v", candidates)
+	}
 
 	got, err := s.GetCredential(created.ID)
 	if err != nil {

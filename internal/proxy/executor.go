@@ -30,6 +30,7 @@ var ErrUpgradeRequired = errors.New("proxy: upstream requires protocol upgrade (
 // Store is the subset of storage used by the executor.
 type Store interface {
 	ListCredentials() ([]storage.Credential, error)
+	ListCredentialCandidates() ([]storage.Credential, error)
 	GetCredential(id string) (storage.Credential, error)
 	UpdateCredential(c storage.Credential) (storage.Credential, error)
 	// PatchCredential applies a mutation under a single store lock (preferred for concurrent updates).
@@ -114,19 +115,19 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 	var lastErr error
 	var lastResp *http.Response
 	idempotencyKey := newIdempotencyKey()
+	candidates, err := e.Store.ListCredentialCandidates()
+	if err != nil {
+		return nil, fmt.Errorf("proxy: list credential candidates: %w", err)
+	}
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
-		creds, err := e.Store.ListCredentials()
-		if err != nil {
-			return nil, fmt.Errorf("proxy: list credentials: %w", err)
-		}
 		// Exclude already-tried credentials from this request.
-		filtered := make([]storage.Credential, 0, len(creds))
-		for _, c := range creds {
+		filtered := make([]storage.Credential, 0, len(candidates))
+		for _, c := range candidates {
 			if _, ok := tried[c.ID]; ok {
 				continue
 			}
@@ -167,6 +168,13 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			"credential_id", cred.ID,
 			"attempt", attempt+1,
 		)
+		selected, gerr := e.Store.GetCredential(cred.ID)
+		if gerr != nil {
+			lastErr = gerr
+			releaseSelection()
+			continue
+		}
+		cred = selected
 
 		tokens, err := e.EnsureToken(ctx, cred)
 		if err != nil {

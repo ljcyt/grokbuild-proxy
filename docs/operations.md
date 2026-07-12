@@ -128,6 +128,11 @@ reported usage of 100%, or an HTTP 402 response, is recorded as
 repeatedly selecting an authenticated account whose upstream quota is
 unavailable. HTTP 402 and 429 never quarantine or delete credentials.
 
+Each generation request snapshots only a lightweight credential candidate list
+once, then reloads the selected full credential before it uses a token. This
+keeps failover from repeatedly cloning the entire token and billing pool while
+preserving the revision and enabled-state checks around each upstream call.
+
 Keep `inspection.purge_after_sec: 0` unless physical deletion is explicitly
 required. When enabled, cleanup occurs only after the retention deadline, an
 unchanged token fingerprint, and another confirmed terminal-auth failure.

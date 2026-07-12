@@ -98,6 +98,39 @@ func (s *Store) ListCredentials() ([]Credential, error) {
 	return out, nil
 }
 
+// ListCredentialCandidates returns the small, non-secret credential view used
+// by the request-path selector. Callers must load the selected credential with
+// GetCredential before using a token or a per-credential outbound route.
+func (s *Store) ListCredentialCandidates() ([]Credential, error) {
+	var out []Credential
+	err := s.withLock(func() error {
+		if err := s.ensureCredentialsCache(); err != nil {
+			return err
+		}
+		out = make([]Credential, 0, len(s.credentialsCache))
+		for _, credential := range s.credentialsCache {
+			candidate := Credential{
+				ID:            credential.ID,
+				Enabled:       credential.Enabled,
+				Priority:      credential.Priority,
+				CooldownUntil: cloneTimePointer(credential.CooldownUntil),
+			}
+			out = append(out, candidate)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority > out[j].Priority
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
 // GetCredential returns a credential by id.
 func (s *Store) GetCredential(id string) (Credential, error) {
 	var found Credential
