@@ -137,6 +137,11 @@ type maskedCredential struct {
 	LastInspectionAt     *time.Time     `json:"last_inspection_at,omitempty"`
 	LastInspectionStatus string         `json:"last_inspection_status,omitempty"`
 	LastInspectionError  string         `json:"last_inspection_error,omitempty"`
+	RateLimitLimitRequests     *int64         `json:"rate_limit_limit_requests,omitempty"`
+	RateLimitRemainingRequests *int64         `json:"rate_limit_remaining_requests,omitempty"`
+	RateLimitLimitTokens       *int64         `json:"rate_limit_limit_tokens,omitempty"`
+	RateLimitRemainingTokens   *int64         `json:"rate_limit_remaining_tokens,omitempty"`
+	RateLimitObservedAt        *time.Time     `json:"rate_limit_observed_at,omitempty"`
 	Billing              map[string]any `json:"billing,omitempty"`
 	CreatedAt            time.Time      `json:"created_at"`
 	UpdatedAt            time.Time      `json:"updated_at"`
@@ -183,6 +188,11 @@ func maskCredential(c storage.Credential) maskedCredential {
 		LastInspectionAt:     c.LastInspectionAt,
 		LastInspectionStatus: c.LastInspectionStatus,
 		LastInspectionError:  c.LastInspectionError,
+		RateLimitLimitRequests:     c.RateLimitLimitRequests,
+		RateLimitRemainingRequests: c.RateLimitRemainingRequests,
+		RateLimitLimitTokens:       c.RateLimitLimitTokens,
+		RateLimitRemainingTokens:   c.RateLimitRemainingTokens,
+		RateLimitObservedAt:        c.RateLimitObservedAt,
 		Billing:              c.Billing,
 		CreatedAt:            c.CreatedAt,
 		UpdatedAt:            c.UpdatedAt,

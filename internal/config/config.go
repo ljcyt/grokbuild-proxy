@@ -3,6 +3,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -28,27 +29,30 @@ const (
 	maxRequestBodyBytes            = 64 << 20
 	maxRequestTimeoutSec           = 60 * 60
 	maxConcurrentRequests          = 1024
+	maxRequestPatchRules           = 64
+	maxRequestPatchSetsPerRule     = 32
 )
 
 // Config is the root runtime configuration for grokbuild-proxy.
 type Config struct {
-	Listen            string           `yaml:"listen"`
-	DataDir           string           `yaml:"data_dir"`
-	APIKey            string           `yaml:"api_key"`
-	AdminKey          string           `yaml:"admin_key"`
-	AllowPublicListen bool             `yaml:"allow_public_listen"`
-	AdminTrustedHosts []string         `yaml:"admin_trusted_hosts"`
-	Upstream          UpstreamConfig   `yaml:"upstream"`
-	OAuth             OAuthConfig      `yaml:"oauth"`
-	ChatBackend       string           `yaml:"chat_backend"`
-	Anthropic         AnthropicConfig  `yaml:"anthropic"`
-	LB                LBConfig         `yaml:"lb"`
-	Proxy             ProxyConfig      `yaml:"proxy"`
-	SSOConverter      SSOConfig        `yaml:"sso_converter"`
-	Inspection        InspectionConfig `yaml:"inspection"`
-	Import            ImportConfig     `yaml:"import"`
-	Limits            LimitsConfig     `yaml:"limits"`
-	Logging           LoggingConfig    `yaml:"logging"`
+	Listen            string             `yaml:"listen"`
+	DataDir           string             `yaml:"data_dir"`
+	APIKey            string             `yaml:"api_key"`
+	AdminKey          string             `yaml:"admin_key"`
+	AllowPublicListen bool               `yaml:"allow_public_listen"`
+	AdminTrustedHosts []string           `yaml:"admin_trusted_hosts"`
+	Upstream          UpstreamConfig     `yaml:"upstream"`
+	OAuth             OAuthConfig        `yaml:"oauth"`
+	ChatBackend       string             `yaml:"chat_backend"`
+	Anthropic         AnthropicConfig    `yaml:"anthropic"`
+	LB                LBConfig           `yaml:"lb"`
+	Proxy             ProxyConfig        `yaml:"proxy"`
+	SSOConverter      SSOConfig          `yaml:"sso_converter"`
+	Inspection        InspectionConfig   `yaml:"inspection"`
+	Import            ImportConfig       `yaml:"import"`
+	RequestPatch      RequestPatchConfig `yaml:"request_patch"`
+	Limits            LimitsConfig       `yaml:"limits"`
+	Logging           LoggingConfig      `yaml:"logging"`
 }
 
 // UpstreamConfig controls how requests are sent to cli-chat-proxy.grok.com.
@@ -79,17 +83,40 @@ type AnthropicConfig struct {
 
 // LBConfig controls multi-credential selection and sticky sessions.
 type LBConfig struct {
-	Strategy       string         `yaml:"strategy"`
-	MaxAttempts    int            `yaml:"max_attempts"`
-	StickyTTLSec   int            `yaml:"sticky_ttl_sec"`
-	RefreshSkewSec int            `yaml:"refresh_skew_sec"`
-	Cooldown       CooldownConfig `yaml:"cooldown"`
+	Strategy    string `yaml:"strategy"`
+	MaxAttempts int    `yaml:"max_attempts"`
+	// QuotaCooldownSec is the cooldown applied when a Responses account has
+	// exhausted its advertised chat quota. It is intentionally separate from
+	// transient HTTP failure cooldowns.
+	QuotaCooldownSec int `yaml:"quota_cooldown_sec"`
+	// QuotaReserveRequests leaves this many advertised request slots unused
+	// while the selector has concurrent work in flight for a credential.
+	QuotaReserveRequests int            `yaml:"quota_reserve_requests"`
+	StickyTTLSec         int            `yaml:"sticky_ttl_sec"`
+	RefreshSkewSec       int            `yaml:"refresh_skew_sec"`
+	Cooldown             CooldownConfig `yaml:"cooldown"`
 }
 
 // CooldownConfig is exponential backoff bounds for failed credentials.
 type CooldownConfig struct {
 	BaseSec int `yaml:"base_sec"`
 	MaxSec  int `yaml:"max_sec"`
+}
+
+// RequestPatchConfig holds ordered raw JSON path overrides applied to the
+// upstream Responses body after protocol translation.
+type RequestPatchConfig struct {
+	Enabled bool               `yaml:"enabled"`
+	Rules   []RequestPatchRule `yaml:"rules"`
+}
+
+// RequestPatchRule is one model-scoped raw override group.
+// Values are raw JSON fragment strings, so complex fields like tools entries
+// and response schemas can be pasted as-is.
+type RequestPatchRule struct {
+	Name   string            `yaml:"name"`
+	Models []string          `yaml:"models"`
+	Set    map[string]string `yaml:"set"`
 }
 
 // ProxyConfig controls the default outbound route. Runtime Admin settings can override it.
@@ -192,10 +219,12 @@ func Default() Config {
 			CountTokens:         false,
 		},
 		LB: LBConfig{
-			Strategy:       "priority_rr",
-			MaxAttempts:    3,
-			StickyTTLSec:   3600,
-			RefreshSkewSec: 180,
+			Strategy:             "priority_rr",
+			MaxAttempts:          10,
+			QuotaCooldownSec:     7 * 24 * 60 * 60,
+			QuotaReserveRequests: 1,
+			StickyTTLSec:         3600,
+			RefreshSkewSec:       180,
 			Cooldown: CooldownConfig{
 				BaseSec: 300,
 				MaxSec:  3600,
@@ -321,6 +350,12 @@ func (c Config) Validate() error {
 	if c.LB.MaxAttempts < 1 || c.LB.MaxAttempts > 20 {
 		return fmt.Errorf("lb.max_attempts must be between 1 and 20")
 	}
+	if c.LB.QuotaCooldownSec <= 0 || c.LB.QuotaCooldownSec > 365*24*60*60 {
+		return fmt.Errorf("lb.quota_cooldown_sec must be between 1 and %d", 365*24*60*60)
+	}
+	if c.LB.QuotaReserveRequests < 0 || c.LB.QuotaReserveRequests > 1000 {
+		return fmt.Errorf("lb.quota_reserve_requests must be between 0 and 1000")
+	}
 	if c.LB.StickyTTLSec < 0 {
 		return fmt.Errorf("lb.sticky_ttl_sec must be >= 0")
 	}
@@ -332,6 +367,9 @@ func (c Config) Validate() error {
 	}
 	if c.LB.Cooldown.MaxSec > 0 && c.LB.Cooldown.BaseSec > c.LB.Cooldown.MaxSec {
 		return fmt.Errorf("lb.cooldown.base_sec must be <= max_sec")
+	}
+	if err := c.RequestPatch.Validate(); err != nil {
+		return err
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Proxy.Mode)) {
 	case "environment", "direct", "url":
@@ -496,6 +534,40 @@ func NormalizeTrustedHost(raw string) (string, error) {
 		}
 	}
 	return value, nil
+}
+
+// Validate checks request_patch bounds and raw JSON values.
+func (c RequestPatchConfig) Validate() error {
+	if len(c.Rules) > maxRequestPatchRules {
+		return fmt.Errorf("request_patch.rules must be <= %d", maxRequestPatchRules)
+	}
+	for i, rule := range c.Rules {
+		if strings.TrimSpace(rule.Name) == "" {
+			return fmt.Errorf("request_patch.rules[%d].name must not be empty", i)
+		}
+		if len(rule.Set) == 0 {
+			return fmt.Errorf("request_patch.rules[%d].set must not be empty", i)
+		}
+		if len(rule.Set) > maxRequestPatchSetsPerRule {
+			return fmt.Errorf("request_patch.rules[%d].set must be <= %d entries", i, maxRequestPatchSetsPerRule)
+		}
+		for path, raw := range rule.Set {
+			if strings.TrimSpace(path) == "" {
+				return fmt.Errorf("request_patch.rules[%d] has empty path", i)
+			}
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				return fmt.Errorf("request_patch.rules[%d] path %q has empty raw value", i, path)
+			}
+			if !json.Valid([]byte(raw)) {
+				return fmt.Errorf("request_patch.rules[%d] path %q is not valid JSON", i, path)
+			}
+		}
+	}
+	if c.Enabled && len(c.Rules) == 0 {
+		return fmt.Errorf("request_patch.enabled requires at least one rule")
+	}
+	return nil
 }
 
 // StickyTTL returns sticky session TTL as a duration.

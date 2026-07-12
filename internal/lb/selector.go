@@ -34,10 +34,12 @@ type healthSnapshot struct {
 
 // Selector picks credentials according to strategy, sticky session and cooldown.
 type Selector struct {
-	strategy     string
-	stickyTTL    time.Duration
-	cooldownBase time.Duration
-	cooldownMax  time.Duration
+	strategy             string
+	stickyTTL            time.Duration
+	cooldownBase         time.Duration
+	cooldownMax          time.Duration
+	quotaCooldown        time.Duration
+	quotaReserveRequests int
 
 	mu        sync.Mutex
 	persistMu sync.Mutex
@@ -78,15 +80,25 @@ func New(cfg config.LBConfig) *Selector {
 	if max <= 0 {
 		max = 3600 * time.Second
 	}
+	quotaCooldown := time.Duration(cfg.QuotaCooldownSec) * time.Second
+	if quotaCooldown <= 0 {
+		quotaCooldown = 7 * 24 * time.Hour
+	}
+	quotaReserveRequests := cfg.QuotaReserveRequests
+	if quotaReserveRequests < 0 {
+		quotaReserveRequests = 0
+	}
 	return &Selector{
-		strategy:     strategy,
-		stickyTTL:    time.Duration(cfg.StickyTTLSec) * time.Second,
-		cooldownBase: base,
-		cooldownMax:  max,
-		priorityRR:   make(map[int]int),
-		sticky:       make(map[string]stickyBinding),
-		states:       make(map[string]*runtimeState),
-		inFlight:     make(map[string]int),
+		strategy:             strategy,
+		stickyTTL:            time.Duration(cfg.StickyTTLSec) * time.Second,
+		cooldownBase:         base,
+		cooldownMax:          max,
+		quotaCooldown:        quotaCooldown,
+		quotaReserveRequests: quotaReserveRequests,
+		priorityRR:           make(map[int]int),
+		sticky:               make(map[string]stickyBinding),
+		states:               make(map[string]*runtimeState),
+		inFlight:             make(map[string]int),
 	}
 }
 
@@ -216,6 +228,36 @@ func (s *Selector) MarkFailure(credID string, status int, retryAfter time.Durati
 	}
 }
 
+// MarkQuotaExhausted applies the quota-specific cooldown and clears all sticky
+// bindings. It is used for advertised zero remaining quota and the known chat
+// endpoint quota-denied response, not for unrelated 402/403 failures.
+func (s *Selector) MarkQuotaExhausted(credID string, now time.Time) {
+	if credID == "" {
+		return
+	}
+	s.mu.Lock()
+	s.releaseLocked(credID)
+	st := s.ensureState(credID)
+	st.FailureCount++
+	st.CooldownUntil = now.Add(s.quotaCooldown)
+	st.LastError = "quota_exhausted"
+	s.clearStickyForCred(credID)
+	failureCount := st.FailureCount
+	cooldownUntil := st.CooldownUntil.UTC().Truncate(time.Second)
+	st.Version++
+	snapshot := healthSnapshot{
+		version:       st.Version,
+		failureCount:  failureCount,
+		cooldownUntil: &cooldownUntil,
+		lastError:     st.LastError,
+	}
+	store := s.store
+	s.mu.Unlock()
+	if store != nil {
+		s.persistHealth(store, credID, snapshot)
+	}
+}
+
 // Release completes a picked credential attempt that ended before an upstream
 // success or classified failure. It is safe to call more than once.
 func (s *Selector) Release(credID string) {
@@ -251,6 +293,10 @@ func (s *Selector) persistHealth(store healthStore, credID string, snapshot heal
 
 // availableLocked filters enabled + not cooling, merging memory cooldowns.
 // Caller must hold s.mu.
+//
+// Free-tier X-Ratelimit remaining=0 is handled by applying maximum cooldown at
+// observation time. Once cooldown ends the account may be tried again so a
+// reset free-tier window can refresh the snapshot.
 func (s *Selector) availableLocked(creds []storage.Credential, now time.Time) []storage.Credential {
 	out := make([]storage.Credential, 0, len(creds))
 	for _, c := range creds {
@@ -288,6 +334,9 @@ func (s *Selector) pickByStrategy(avail []storage.Credential) (storage.Credentia
 	if len(avail) == 0 {
 		return storage.Credential{}, ErrNoCredential
 	}
+	if preferred := s.quotaPreferredLocked(avail); len(preferred) > 0 {
+		avail = preferred
+	}
 	switch s.strategy {
 	case "round_robin":
 		return s.pickRoundRobin(avail), nil
@@ -297,6 +346,21 @@ func (s *Selector) pickByStrategy(avail []storage.Credential) (storage.Credentia
 		// Unknown strategy: fall back to priority_rr for safety.
 		return s.pickPriorityRR(avail), nil
 	}
+}
+
+// quotaPreferredLocked avoids a credential whose advertised request budget is
+// already consumed by in-flight work plus the configured safety reserve. It
+// intentionally falls back to the original pool when every account is tight.
+// Caller must hold s.mu.
+func (s *Selector) quotaPreferredLocked(avail []storage.Credential) []storage.Credential {
+	preferred := make([]storage.Credential, 0, len(avail))
+	for _, credential := range avail {
+		if credential.RateLimitRemainingRequests == nil ||
+			*credential.RateLimitRemainingRequests > int64(s.inFlight[credential.ID]+s.quotaReserveRequests) {
+			preferred = append(preferred, credential)
+		}
+	}
+	return preferred
 }
 
 // pickRoundRobin advances a flat RR cursor over avail (order preserved).

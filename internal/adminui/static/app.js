@@ -467,6 +467,26 @@
     if (c.cooldown_until) {
       meta.appendChild(lineMeta("冷却至", fmtTime(c.cooldown_until)));
     }
+    if (
+      c.rate_limit_remaining_requests != null ||
+      c.rate_limit_limit_requests != null ||
+      c.rate_limit_remaining_tokens != null ||
+      c.rate_limit_limit_tokens != null
+    ) {
+      var reqPart =
+        (c.rate_limit_remaining_requests != null ? String(c.rate_limit_remaining_requests) : "—") +
+        " / " +
+        (c.rate_limit_limit_requests != null ? String(c.rate_limit_limit_requests) : "—");
+      var tokPart =
+        (c.rate_limit_remaining_tokens != null ? String(c.rate_limit_remaining_tokens) : "—") +
+        " / " +
+        (c.rate_limit_limit_tokens != null ? String(c.rate_limit_limit_tokens) : "—");
+      meta.appendChild(lineMeta("聊天额度(请求)", reqPart));
+      meta.appendChild(lineMeta("聊天额度(Token)", tokPart));
+      if (c.rate_limit_observed_at) {
+        meta.appendChild(lineMeta("额度采样", fmtTime(c.rate_limit_observed_at)));
+      }
+    }
     if (c.last_inspection_at || c.last_inspection_status || c.last_inspection_error) {
       meta.appendChild(lineMeta("最近巡检", fmtTime(c.last_inspection_at)));
       meta.appendChild(lineMeta("巡检结果", inspectionStatusText(c.last_inspection_status)));

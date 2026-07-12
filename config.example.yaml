@@ -42,13 +42,28 @@ anthropic:
 lb:
   strategy: "priority_rr"
   # Number of distinct accounts to try before returning a retryable upstream
-  # failure. Keep this modest to avoid amplifying a shared upstream outage.
-  max_attempts: 3
+  # failure. A larger independent account pool can use a deeper failover.
+  max_attempts: 10
+  # Applied only when Responses reports zero remaining chat quota or the
+  # known chat-endpoint quota denial is returned. It does not affect normal 403s.
+  quota_cooldown_sec: 604800
+  # Keep this many request slots beyond the current in-flight count as a safety margin.
+  quota_reserve_requests: 1
   sticky_ttl_sec: 3600
   refresh_skew_sec: 180
   cooldown:
     base_sec: 300
     max_sec: 3600
+# 上游 Responses 原始 JSON 路径覆盖（协议转换之后、发往 Grok 之前）。
+# set 的值必须是 JSON 片段字符串，适合 tools / text.format 等复杂字段。
+# tools.-1 表示向 tools 数组追加一项；同 type 已存在时不会重复追加。
+request_patch:
+  enabled: false
+  rules:
+    - name: force-web-search
+      models: ["default", "grok-4.5"]
+      set:
+        tools.-1: '{"type":"web_search"}'
 # 默认出站路由。Admin 运行时设置会覆盖这里的值。
 # mode: environment | direct | url
 proxy:

@@ -91,8 +91,11 @@ func TestDefaultAlignedWithPlan(t *testing.T) {
 	if cfg.LB.Strategy != "priority_rr" {
 		t.Fatalf("lb.strategy: got %q", cfg.LB.Strategy)
 	}
-	if cfg.LB.MaxAttempts != 3 {
+	if cfg.LB.MaxAttempts != 10 {
 		t.Fatalf("lb.max_attempts: got %d", cfg.LB.MaxAttempts)
+	}
+	if cfg.LB.QuotaCooldownSec != 7*24*60*60 || cfg.LB.QuotaReserveRequests != 1 {
+		t.Fatalf("lb quota settings: %+v", cfg.LB)
 	}
 	if cfg.LB.StickyTTLSec != 3600 || cfg.LB.RefreshSkewSec != 180 {
 		t.Fatalf("lb sticky/refresh: %+v", cfg.LB)
@@ -141,6 +144,8 @@ anthropic:
 lb:
   strategy: round_robin
   max_attempts: 7
+  quota_cooldown_sec: 7200
+  quota_reserve_requests: 2
   sticky_ttl_sec: 120
   refresh_skew_sec: 60
   cooldown:
@@ -186,6 +191,9 @@ logging:
 	if cfg.LB.MaxAttempts != 7 {
 		t.Fatalf("max_attempts: %d", cfg.LB.MaxAttempts)
 	}
+	if cfg.LB.QuotaCooldownSec != 7200 || cfg.LB.QuotaReserveRequests != 2 {
+		t.Fatalf("quota settings: %+v", cfg.LB)
+	}
 	if cfg.LB.StickyTTLSec != 120 {
 		t.Fatalf("sticky_ttl: %d", cfg.LB.StickyTTLSec)
 	}
@@ -200,6 +208,54 @@ logging:
 	}
 	if cfg.Anthropic.CountTokens {
 		t.Fatal("count_tokens must remain disabled")
+	}
+}
+
+func TestLoadRequestPatchRules(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+request_patch:
+  enabled: true
+  rules:
+    - name: force-web-search
+      models: ["default", "grok-4.5"]
+      set:
+        tools.-1: '{"type":"web_search"}'
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.RequestPatch.Enabled {
+		t.Fatal("request_patch.enabled want true")
+	}
+	if len(cfg.RequestPatch.Rules) != 1 {
+		t.Fatalf("rules=%d", len(cfg.RequestPatch.Rules))
+	}
+	rule := cfg.RequestPatch.Rules[0]
+	if rule.Name != "force-web-search" {
+		t.Fatalf("name=%q", rule.Name)
+	}
+	if got := rule.Set["tools.-1"]; got != `{"type":"web_search"}` {
+		t.Fatalf("set value=%q", got)
+	}
+}
+
+func TestRequestPatchValidateRejectsInvalidJSON(t *testing.T) {
+	cfg := Default()
+	cfg.RequestPatch = RequestPatchConfig{
+		Enabled: true,
+		Rules: []RequestPatchRule{{
+			Name: "bad",
+			Set:  map[string]string{"tools.-1": `{not-json`},
+		}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected invalid raw JSON error")
 	}
 }
 
@@ -261,6 +317,8 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"bad strategy", func(c *Config) { c.LB.Strategy = "random" }},
 		{"zero max attempts", func(c *Config) { c.LB.MaxAttempts = 0 }},
 		{"too many max attempts", func(c *Config) { c.LB.MaxAttempts = 21 }},
+		{"zero quota cooldown", func(c *Config) { c.LB.QuotaCooldownSec = 0 }},
+		{"negative quota reserve", func(c *Config) { c.LB.QuotaReserveRequests = -1 }},
 		{"neg sticky", func(c *Config) { c.LB.StickyTTLSec = -1 }},
 		{"cooldown inverted", func(c *Config) { c.LB.Cooldown.BaseSec = 10; c.LB.Cooldown.MaxSec = 5 }},
 		{"zero body", func(c *Config) { c.Limits.MaxBodyBytes = 0 }},

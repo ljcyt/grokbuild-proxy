@@ -78,6 +78,7 @@ flowchart TD
 | `internal/anthropic` | Messages request/response/SSE translation |
 | `internal/openai` | Responses sanitization and Chat Completions adaptation |
 | `internal/proxy` | Credential selection, token acquisition, retries, failover |
+| `internal/requestpatch` | Optional raw JSON path overrides on upstream Responses bodies |
 | `internal/lb` | Priority selection, sticky sessions, least-inflight tie-break, cooldown state |
 | `internal/auth` | OAuth discovery, device flow, import, refresh |
 | `internal/importer` | Bounded asynchronous multi-format credential imports |
@@ -175,7 +176,11 @@ The request path:
 
 HTTP 402 and 429 can fail over before a response body is sent. Credential health
 survives process restarts. Quota exhaustion discovered by inspection uses the
-maximum cooldown and is not treated as OAuth failure.
+maximum cooldown and is not treated as OAuth failure. Free-tier
+`X-Ratelimit-Remaining-Requests/Tokens` headers on successful Responses calls are
+persisted per credential; a zero remaining counter applies the maximum cooldown
+and clears sticky bindings so the next turn selects another account while still
+returning the successful response for the current turn.
 
 OAuth refresh is currently request-driven; there is no background pre-refresh
 scheduler.

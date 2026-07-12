@@ -17,6 +17,8 @@ Releases 为准。
 - 生成请求热路径使用一次性轻量候选池（仅 ID / 启用 / 优先级 / 冷却），选中后再加载完整凭据。
 - Admin 凭据列表支持服务端分页与筛选：`page`、`page_size`（1-100）、`q`、`status`。
 - 巡检在 `/models` 通过后检查周额度；`100%` 或上游 `402` 记为 `quota_exhausted` 并进入最长冷却，不按 OAuth 失效隔离。
+- 新增 `request_patch`：按模型匹配的原始 JSON 路径覆盖，支持 `tools.-1` 等复杂字段注入。
+- 记录上游 `X-Ratelimit-*` 聊天额度；剩余请求或 Token 为 0 时进入最长冷却并切换账号，降低下一轮 Forbidden 中断。
 
 #### 变更
 
@@ -37,6 +39,8 @@ Releases 为准。
 - Generation hot path snapshots a lightweight candidate pool once (id / enabled / priority / cooldown) and loads the full credential only after pick.
 - Admin credential list pagination and filters: `page`, `page_size` (1-100), `q`, `status`.
 - Inspection probes `/models` then weekly quota; 100% usage or HTTP 402 is recorded as `quota_exhausted` with maximum cooldown, not OAuth quarantine.
+- Added `request_patch` raw JSON path overrides for upstream Responses bodies, including append paths such as `tools.-1`.
+- Persist free-tier `X-Ratelimit-*` counters per credential; remaining requests/tokens at 0 enter maximum cooldown and rebind the next turn.
 
 #### Changed
 

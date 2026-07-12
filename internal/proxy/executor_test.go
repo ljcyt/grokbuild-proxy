@@ -735,6 +735,55 @@ func TestExecutorPostFailoverOnPaymentRequired(t *testing.T) {
 	}
 }
 
+func TestExecutorPostFailoverOnChatEndpointForbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Authorization"), "token-a") {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"message":"Forbidden: Access to the chat endpoint is denied."}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"ok-from-b"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	now := time.Date(2026, 7, 12, 17, 0, 0, 0, time.UTC)
+	store := newMemStore(
+		storage.Credential{ID: "cred_a", AccessToken: "token-a", Enabled: true, Priority: 200},
+		storage.Credential{ID: "cred_b", AccessToken: "token-b", Enabled: true, Priority: 100},
+	)
+	selector := lb.New(config.LBConfig{
+		Strategy:         "priority_rr",
+		QuotaCooldownSec: 3600,
+		Cooldown:         config.CooldownConfig{BaseSec: 10, MaxSec: 60},
+	}).SetHealthStore(store)
+	ex := &Executor{
+		Store:       store,
+		Selector:    selector,
+		Upstream:    upstream.NewClient(upstream.Config{BaseURL: srv.URL + "/v1", HTTPClient: srv.Client()}),
+		Refresher:   passthroughRefresher{},
+		MaxAttempts: 2,
+		Now:         func() time.Time { return now },
+	}
+
+	resp, err := ex.Post(context.Background(), "grok-4.5", "session-1", []byte(`{"model":"grok-4.5"}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "ok-from-b") {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
+	}
+	cooled, err := store.GetCredential("cred_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cooled.CooldownUntil == nil || cooled.CooldownUntil.Sub(now) != time.Hour || cooled.LastError != "quota_exhausted" {
+		t.Fatalf("forbidden account was not cooled: %+v", cooled)
+	}
+}
+
 func TestExecutorPreservesFinalUpstreamError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "7")
@@ -775,6 +824,113 @@ func TestProbeCredentialTreatsExhaustedWeeklyCreditsAsUnavailable(t *testing.T) 
 	status, err := executor.ProbeCredential(context.Background(), "cred")
 	if err != nil || status != http.StatusPaymentRequired {
 		t.Fatalf("status=%d err=%v", status, err)
+	}
+}
+
+func TestExecutorPersistsRateLimitAndCoolsWhenExhausted(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("X-Ratelimit-Limit-Requests", "21")
+		w.Header().Set("X-Ratelimit-Remaining-Requests", "0")
+		w.Header().Set("X-Ratelimit-Limit-Tokens", "2000000")
+		w.Header().Set("X-Ratelimit-Remaining-Tokens", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"resp_ok","output":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	store := newMemStore(
+		storage.Credential{ID: "cred_a", AccessToken: "token-a", Enabled: true, Priority: 10},
+		storage.Credential{ID: "cred_b", AccessToken: "token-b", Enabled: true, Priority: 10},
+	)
+	selector := lb.New(config.LBConfig{Strategy: "priority_rr", StickyTTLSec: 3600}).SetHealthStore(store)
+	ex := &Executor{
+		Store:       store,
+		Selector:    selector,
+		Upstream:    upstream.NewClient(upstream.Config{BaseURL: srv.URL + "/v1", HTTPClient: srv.Client()}),
+		Refresher:   passthroughRefresher{},
+		MaxAttempts: 3,
+		Now:         func() time.Time { return now },
+	}
+
+	resp, err := ex.Post(context.Background(), "grok-4.5", "session-1", []byte(`{}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+
+	// Whichever account was used should have remaining 0 and cooldown.
+	var cooled storage.Credential
+	for _, id := range []string{"cred_a", "cred_b"} {
+		c, err := store.GetCredential(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.RateLimitRemainingRequests != nil && *c.RateLimitRemainingRequests == 0 {
+			cooled = c
+			break
+		}
+	}
+	if cooled.ID == "" {
+		t.Fatal("expected rate limit snapshot on used credential")
+	}
+	if cooled.CooldownUntil == nil || !cooled.CooldownUntil.After(now) {
+		t.Fatalf("expected cooldown after exhaustion: %+v", cooled)
+	}
+	if cooled.LastError != "quota_exhausted" {
+		t.Fatalf("last error=%q", cooled.LastError)
+	}
+	if cooled.RateLimitLimitRequests == nil || *cooled.RateLimitLimitRequests != 21 {
+		t.Fatalf("limit requests=%v", cooled.RateLimitLimitRequests)
+	}
+
+	// Next sticky session request must switch away from the cooled account.
+	resp2, err := ex.Post(context.Background(), "grok-4.5", "session-1", []byte(`{}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if hits < 2 {
+		t.Fatalf("hits=%d want at least 2 (second request should pick another account)", hits)
+	}
+}
+
+func TestExecutorPersistsNonExhaustedRateLimitWithoutCooldown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Ratelimit-Limit-Requests", "21")
+		w.Header().Set("X-Ratelimit-Remaining-Requests", "20")
+		w.Header().Set("X-Ratelimit-Limit-Tokens", "2000000")
+		w.Header().Set("X-Ratelimit-Remaining-Tokens", "1999990")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"ok"}`))
+	}))
+	t.Cleanup(srv.Close)
+	store := newMemStore(storage.Credential{ID: "cred", AccessToken: "token", Enabled: true})
+	ex := &Executor{
+		Store:     store,
+		Selector:  lb.New(config.LBConfig{Strategy: "priority_rr"}),
+		Upstream:  upstream.NewClient(upstream.Config{BaseURL: srv.URL + "/v1", HTTPClient: srv.Client()}),
+		Refresher: passthroughRefresher{},
+	}
+	resp, err := ex.Post(context.Background(), "grok-4.5", "", []byte(`{}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	cred, err := store.GetCredential("cred")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.RateLimitRemainingRequests == nil || *cred.RateLimitRemainingRequests != 20 {
+		t.Fatalf("remaining=%v", cred.RateLimitRemainingRequests)
+	}
+	if cred.CooldownUntil != nil {
+		t.Fatalf("unexpected cooldown %v", cred.CooldownUntil)
 	}
 }
 

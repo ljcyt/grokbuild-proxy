@@ -22,7 +22,7 @@ import (
 )
 
 // DefaultMaxAttempts is the max number of credential picks for a single Post.
-const DefaultMaxAttempts = 3
+const DefaultMaxAttempts = 10
 
 // ErrUpgradeRequired is returned when upstream responds 426 (protocol upgrade required).
 var ErrUpgradeRequired = errors.New("proxy: upstream requires protocol upgrade (426)")
@@ -46,6 +46,10 @@ type Selector interface {
 
 type selectorReleaser interface {
 	Release(credID string)
+}
+
+type quotaExhaustionMarker interface {
+	MarkQuotaExhausted(credID string, now time.Time)
 }
 
 // Upstream is the subset of upstream.Client used by the executor.
@@ -85,6 +89,9 @@ type Executor struct {
 	// retry detect a global proxy change and restart instead of sending a newly
 	// refreshed access token through a transport resolved under old settings.
 	RouteRevision func() uint64
+	// BodyPatch optionally rewrites the upstream Responses body after protocol
+	// translation (raw JSON path overrides such as tools.-1).
+	BodyPatch func(body []byte, model string) ([]byte, error)
 
 	usageMu  sync.Mutex
 	lastUsed map[string]time.Time
@@ -104,6 +111,13 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if e.BodyPatch != nil {
+		patched, err := e.BodyPatch(body, model)
+		if err != nil {
+			return nil, err
+		}
+		body = patched
 	}
 
 	maxAttempts := e.MaxAttempts
@@ -275,7 +289,20 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				"attempt", attempt+1,
 				"upstream_status", resp.StatusCode,
 			)
-			markSuccess()
+			// Free-tier X-Ratelimit-* headers are only present on Responses.
+			// Persist the snapshot always; if remaining hits 0 after this successful
+			// turn, cool the account down so the next turn switches credentials
+			// before the client sees chat-endpoint Forbidden.
+			if e.observeRateLimit(cred.ID, resp.Header) {
+				e.log(ctx, slog.LevelInfo, "credential_rate_limit_exhausted",
+					"credential_id", cred.ID,
+					"attempt", attempt+1,
+				)
+				// This successful response is still returned; the next turn switches.
+				e.markQuotaExhausted(cred.ID)
+			} else {
+				markSuccess()
+			}
 			_ = e.touchLastUsed(cred)
 			return resp, nil
 		}
@@ -363,7 +390,11 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				continue
 			}
 			if retry.StatusCode >= 200 && retry.StatusCode < 300 {
-				markSuccess()
+				if e.observeRateLimit(cred.ID, retry.Header) {
+					e.markQuotaExhausted(cred.ID)
+				} else {
+					markSuccess()
+				}
 				_ = e.touchLastUsed(cred)
 				return retry, nil
 			}
@@ -375,7 +406,11 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			ra := parseRetryAfterAt(retry.Header.Get("Retry-After"), e.now())
 			status := retry.StatusCode
 			lastResp = bufferErrorResponse(retry)
-			markFailure(status, ra)
+			if e.observeRateLimit(cred.ID, retry.Header) || isChatEndpointQuotaDenied(lastResp) {
+				e.markQuotaExhausted(cred.ID)
+			} else {
+				markFailure(status, ra)
+			}
 			e.log(ctx, slog.LevelWarn, "upstream_retryable_status",
 				"credential_id", cred.ID,
 				"attempt", attempt+1,
@@ -391,7 +426,12 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			ra := parseRetryAfterAt(resp.Header.Get("Retry-After"), e.now())
 			status := resp.StatusCode
 			lastResp = bufferErrorResponse(resp)
-			markFailure(status, ra)
+			// Capture free-tier remaining counters when present (often missing on errors).
+			if e.observeRateLimit(cred.ID, resp.Header) || isChatEndpointQuotaDenied(lastResp) {
+				e.markQuotaExhausted(cred.ID)
+			} else {
+				markFailure(status, ra)
+			}
 			e.log(ctx, slog.LevelWarn, "upstream_retryable_status",
 				"credential_id", cred.ID,
 				"attempt", attempt+1,
@@ -920,6 +960,56 @@ func shouldMarkDiscoveryFailure(status int) bool {
 	}
 }
 
+// observeRateLimit persists free-tier X-Ratelimit-* counters for a credential.
+// It returns true when remaining requests or tokens have reached zero, so the
+// caller can apply a long cooldown and switch accounts on the next turn.
+func (e *Executor) observeRateLimit(credID string, header http.Header) bool {
+	if e == nil || e.Store == nil || credID == "" || header == nil {
+		return false
+	}
+	limit, ok := upstream.ParseRateLimitHeaders(header)
+	if !ok {
+		return false
+	}
+	now := e.now().UTC().Truncate(time.Second)
+	_, err := e.Store.PatchCredential(credID, func(c *storage.Credential) error {
+		c.RateLimitLimitRequests = cloneInt64Ptr(limit.LimitRequests)
+		c.RateLimitRemainingRequests = cloneInt64Ptr(limit.RemainingRequests)
+		c.RateLimitLimitTokens = cloneInt64Ptr(limit.LimitTokens)
+		c.RateLimitRemainingTokens = cloneInt64Ptr(limit.RemainingTokens)
+		observed := now
+		c.RateLimitObservedAt = &observed
+		return nil
+	})
+	if err != nil {
+		e.log(context.Background(), slog.LevelDebug, "credential_rate_limit_persist_failed",
+			"credential_id", credID,
+			"error", err,
+		)
+	}
+	return limit.Exhausted()
+}
+
+func (e *Executor) markQuotaExhausted(credID string) {
+	if e == nil || e.Selector == nil || credID == "" {
+		return
+	}
+	if marker, ok := e.Selector.(quotaExhaustionMarker); ok {
+		marker.MarkQuotaExhausted(credID, e.now())
+		return
+	}
+	// Keep custom selectors compatible while retaining the previous behavior.
+	e.Selector.MarkFailure(credID, http.StatusPaymentRequired, 0, e.now())
+}
+
+func cloneInt64Ptr(v *int64) *int64 {
+	if v == nil {
+		return nil
+	}
+	copy := *v
+	return &copy
+}
+
 func (e *Executor) touchLastUsed(cred storage.Credential) error {
 	if e.Store == nil || cred.ID == "" {
 		return nil
@@ -1035,6 +1125,17 @@ func bufferErrorResponse(resp *http.Response) *http.Response {
 	clone.Body = io.NopCloser(strings.NewReader(string(raw)))
 	clone.ContentLength = int64(len(raw))
 	return clone
+}
+
+func isChatEndpointQuotaDenied(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode != http.StatusForbidden || resp.Body == nil {
+		return false
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(strings.NewReader(string(raw)))
+	resp.ContentLength = int64(len(raw))
+	return strings.Contains(strings.ToLower(string(raw)), "access to the chat endpoint is denied")
 }
 
 // DrainAndClose is a helper for callers that abandon a response.

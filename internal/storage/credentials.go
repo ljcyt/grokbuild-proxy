@@ -66,6 +66,12 @@ type Credential struct {
 	LastInspectionStatus       string         `json:"last_inspection_status,omitempty"`
 	LastInspectionError        string         `json:"last_inspection_error,omitempty"`
 	ConsecutiveUnauthorized    int            `json:"consecutive_unauthorized,omitempty"`
+	// Free-tier chat rate limit snapshot from X-Ratelimit-* Responses headers.
+	RateLimitLimitRequests     *int64     `json:"rate_limit_limit_requests,omitempty"`
+	RateLimitRemainingRequests *int64     `json:"rate_limit_remaining_requests,omitempty"`
+	RateLimitLimitTokens       *int64     `json:"rate_limit_limit_tokens,omitempty"`
+	RateLimitRemainingTokens   *int64     `json:"rate_limit_remaining_tokens,omitempty"`
+	RateLimitObservedAt        *time.Time `json:"rate_limit_observed_at,omitempty"`
 	Billing                    map[string]any `json:"billing,omitempty"`
 	CreatedAt                  time.Time      `json:"created_at"`
 	UpdatedAt                  time.Time      `json:"updated_at"`
@@ -110,10 +116,12 @@ func (s *Store) ListCredentialCandidates() ([]Credential, error) {
 		out = make([]Credential, 0, len(s.credentialsCache))
 		for _, credential := range s.credentialsCache {
 			candidate := Credential{
-				ID:            credential.ID,
-				Enabled:       credential.Enabled,
-				Priority:      credential.Priority,
-				CooldownUntil: cloneTimePointer(credential.CooldownUntil),
+				ID:                         credential.ID,
+				Enabled:                    credential.Enabled,
+				Priority:                   credential.Priority,
+				CooldownUntil:               cloneTimePointer(credential.CooldownUntil),
+				RateLimitRemainingRequests: cloneInt64Pointer(credential.RateLimitRemainingRequests),
+				RateLimitRemainingTokens:   cloneInt64Pointer(credential.RateLimitRemainingTokens),
 			}
 			out = append(out, candidate)
 		}
@@ -1054,10 +1062,23 @@ func cloneCredential(credential Credential) Credential {
 	credential.LastUsedAt = cloneTimePointer(credential.LastUsedAt)
 	credential.LastSuccessAt = cloneTimePointer(credential.LastSuccessAt)
 	credential.LastInspectionAt = cloneTimePointer(credential.LastInspectionAt)
+	credential.RateLimitLimitRequests = cloneInt64Pointer(credential.RateLimitLimitRequests)
+	credential.RateLimitRemainingRequests = cloneInt64Pointer(credential.RateLimitRemainingRequests)
+	credential.RateLimitLimitTokens = cloneInt64Pointer(credential.RateLimitLimitTokens)
+	credential.RateLimitRemainingTokens = cloneInt64Pointer(credential.RateLimitRemainingTokens)
+	credential.RateLimitObservedAt = cloneTimePointer(credential.RateLimitObservedAt)
 	if credential.Billing != nil {
 		credential.Billing = cloneStringAnyMap(credential.Billing)
 	}
 	return credential
+}
+
+func cloneInt64Pointer(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func cloneTimePointer(value *time.Time) *time.Time {

@@ -14,8 +14,10 @@ import (
 
 func testCfg(strategy string) config.LBConfig {
 	return config.LBConfig{
-		Strategy:     strategy,
-		StickyTTLSec: 3600,
+		Strategy:             strategy,
+		QuotaCooldownSec:     7 * 24 * 60 * 60,
+		QuotaReserveRequests: 1,
+		StickyTTLSec:         3600,
 		Cooldown: config.CooldownConfig{
 			BaseSec: 300,
 			MaxSec:  3600,
@@ -312,6 +314,48 @@ func TestMarkFailure_StatusCooldowns(t *testing.T) {
 	s3.mu.Unlock()
 	if until3.Sub(now) < 50*time.Minute {
 		t.Fatalf("403 cooldown too short: %v", until3.Sub(now))
+	}
+}
+
+func TestMarkQuotaExhaustedUsesDedicatedCooldown(t *testing.T) {
+	cfg := testCfg("priority_rr")
+	cfg.QuotaCooldownSec = 7 * 24 * 60 * 60
+	s := New(cfg)
+	now := time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
+	s.MarkSuccess("quota", "session", now)
+	s.MarkQuotaExhausted("quota", now)
+
+	s.mu.Lock()
+	state := *s.states["quota"]
+	_, sticky := s.sticky["session"]
+	s.mu.Unlock()
+	if sticky {
+		t.Fatal("quota exhaustion must clear sticky bindings")
+	}
+	if state.LastError != "quota_exhausted" {
+		t.Fatalf("last error=%q", state.LastError)
+	}
+	if got := state.CooldownUntil.Sub(now); got != 7*24*time.Hour {
+		t.Fatalf("quota cooldown=%v", got)
+	}
+}
+
+func TestPickPrefersQuotaHeadroomOverPriority(t *testing.T) {
+	cfg := testCfg("priority_rr")
+	cfg.QuotaReserveRequests = 1
+	s := New(cfg)
+	now := time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
+	one := int64(1)
+	creds := []storage.Credential{
+		{ID: "tight", Enabled: true, Priority: 200, RateLimitRemainingRequests: &one},
+		{ID: "safe", Enabled: true, Priority: 100},
+	}
+	picked, err := s.Pick(creds, "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if picked.ID != "safe" {
+		t.Fatalf("pick=%q want safe account with quota headroom", picked.ID)
 	}
 }
 

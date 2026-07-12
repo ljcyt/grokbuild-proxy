@@ -238,6 +238,7 @@ ghcr.io/greygung/grokbuild-proxy-sso-import
 | `oauth.*` | xAI OAuth Issuer、Client、Scope 和回调 |
 | `anthropic.model_aliases` | Claude 模型到 Grok 模型的映射 |
 | `lb.*` | 凭据选择、`max_attempts`、会话粘滞、在途均衡、刷新和冷却策略 |
+| `request_patch.*` | 上游 Responses 原始 JSON 路径覆盖（如 `tools.-1` 追加 web_search） |
 | `proxy.*` | 默认出站代理模式和 URL；Admin 运行时设置可覆盖 |
 | `sso_converter.*` | 可选 SSO 转换服务地址、密钥和边界 |
 | `inspection.*` | 定时巡检、并发、熔断和延迟清理策略 |

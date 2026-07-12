@@ -98,11 +98,13 @@ replay; it does not decrypt or reinterpret the content.
 | Scheduled/manual inspection with 401 confirmation | Supported |
 | 429 cooldown without quarantine | Supported |
 | Quota exhausted (`100%` weekly usage or HTTP 402) max cooldown | Supported; not OAuth quarantine |
+| Free-tier `X-Ratelimit-*` snapshot and exhausted cooldown | Supported on Responses responses |
 | Configurable multi-credential failover depth (`lb.max_attempts`) | Supported (1-20, default 3) |
 | Least-inflight selection within the same priority | Supported |
 | Lightweight candidate-pool selection per generation request | Supported |
 | Admin credential list pagination/filter (`page`, `page_size`, `q`, `status`) | Supported |
 | On-demand Admin billing load | Supported |
+| Operator raw JSON path overrides (`request_patch`) | Supported when enabled |
 | Quarantine recovery after token rotation | Supported |
 | Automatic physical cleanup | Optional; disabled by default |
 | Grok Build shared weekly quota view | Supported when upstream reports it |

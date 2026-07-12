@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 	"github.com/GreyGunG/grokbuild-proxy/internal/openai"
 	"github.com/GreyGunG/grokbuild-proxy/internal/outbound"
 	"github.com/GreyGunG/grokbuild-proxy/internal/proxy"
+	"github.com/GreyGunG/grokbuild-proxy/internal/requestpatch"
 	runtimesettings "github.com/GreyGunG/grokbuild-proxy/internal/settings"
 	"github.com/GreyGunG/grokbuild-proxy/internal/sso"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
@@ -135,6 +137,7 @@ func main() {
 	up := upstream.NewClient(upstreamConfig)
 
 	selector := lb.New(cfg.LB).SetHealthStore(store)
+	bodyPatch := requestPatcherFromConfig(cfg.RequestPatch)
 
 	exec := &proxy.Executor{
 		Store:       store,
@@ -154,6 +157,7 @@ func main() {
 		Logger:        logger,
 		RequestID:     httpserver.RequestIDFromContext,
 		RouteRevision: settingsManager.Revision,
+		BodyPatch:     bodyPatch,
 	}
 	ssoConverter := configuredSSOConverter(settingsManager, outboundFactory)
 	importManager, err := importer.NewManager(store, ssoConverter, importer.Limits{
@@ -182,7 +186,7 @@ func main() {
 		Settings:             settingsManager,
 		Logger:               logger,
 		RateLimitCooldown:    time.Duration(cfg.LB.Cooldown.BaseSec) * time.Second,
-		QuotaCooldown:        time.Duration(cfg.LB.Cooldown.MaxSec) * time.Second,
+		QuotaCooldown:        time.Duration(cfg.LB.QuotaCooldownSec) * time.Second,
 		InvalidateCredential: refresher.Invalidate,
 	}
 	inspectionCtx, stopInspection := context.WithCancel(context.Background())
@@ -375,4 +379,24 @@ func configuredSSOConverter(settings sso.SettingsProvider, factory sso.HTTPClien
 	// while disabled allows an Admin settings update to enable SSO imports
 	// without restarting the process.
 	return &sso.Client{Settings: settings, Outbound: factory}
+}
+
+func requestPatcherFromConfig(cfg config.RequestPatchConfig) func([]byte, string) ([]byte, error) {
+	if !cfg.Enabled || len(cfg.Rules) == 0 {
+		return nil
+	}
+	rules := make([]requestpatch.Rule, 0, len(cfg.Rules))
+	for _, rule := range cfg.Rules {
+		set := make(map[string]json.RawMessage, len(rule.Set))
+		for path, raw := range rule.Set {
+			set[path] = json.RawMessage(strings.TrimSpace(raw))
+		}
+		rules = append(rules, requestpatch.Rule{
+			Name:   rule.Name,
+			Models: append([]string(nil), rule.Models...),
+			Set:    set,
+		})
+	}
+	patcher := &requestpatch.Patcher{Rules: rules}
+	return patcher.Apply
 }

@@ -91,15 +91,50 @@ cooperatively stop semaphore waits, retries, backoff, and polling.
 ## Multi-account failover
 
 `lb.max_attempts` limits how many distinct credentials one request may try
-after a retryable upstream failure. The default is 3 and the accepted range is
+after a retryable upstream failure. The default is 10 and the accepted range is
 1 through 20. Increase it only when the account pool is independent enough to
 justify the extra latency and upstream requests during an outage; it is not a
-quota-bypass setting. The Admin credential list filters accounts locally and
+quota-bypass setting. `lb.quota_cooldown_sec` defaults to seven days and only
+applies when a Responses account reports zero remaining quota or returns the
+known chat-endpoint quota denial; ordinary 403/402 failures keep using
+`lb.cooldown.max_sec`. `lb.quota_reserve_requests` reserves request capacity
+for concurrent work, so accounts with a tight advertised budget yield to other
+accounts before they hit the quota boundary. The Admin credential list filters accounts locally and
 loads billing only when an operator selects **Billing**, so opening a large
 pool does not fan out one upstream billing request per account. The credential
 list is server-paginated: `page`, `page_size` (1-100), `q`, and `status`
 (`all`, `available`, `cooling`, or `disabled`) are accepted by
 `GET /admin/credentials`; the Admin UI requests 24 accounts per page.
+
+## Request raw path overrides
+
+`request_patch` rewrites the upstream Responses JSON body after Anthropic/OpenAI
+translation and before the Grok request is sent. Values are raw JSON fragments
+as strings (not YAML objects), which is useful for complex fields such as tools
+entries, `text.format`, or schemas.
+
+Example: always append Grok built-in web search for matching models:
+
+```yaml
+request_patch:
+  enabled: true
+  rules:
+    - name: force-web-search
+      models: ["default", "grok-4.5"]
+      set:
+        tools.-1: '{"type":"web_search"}'
+```
+
+Path notes:
+
+- dotted object paths, for example `text.format`
+- numeric array indexes, for example `tools.0`
+- `tools.-1` appends one item; if a tool with the same `type` already exists, the
+  append is skipped
+- empty `models`, `*`, or `default` matches every model
+
+Keep this off unless you need operator-side injection. It does not bypass
+upstream policy, quotas, or authentication.
 
 ## Proxy changes
 
@@ -127,6 +162,15 @@ reported usage of 100%, or an HTTP 402 response, is recorded as
 `quota_exhausted` and uses the configured maximum cooldown; this avoids
 repeatedly selecting an authenticated account whose upstream quota is
 unavailable. HTTP 402 and 429 never quarantine or delete credentials.
+
+Successful `POST /v1/responses` responses may include free-tier chat headers
+`X-Ratelimit-Limit-Requests`, `X-Ratelimit-Remaining-Requests`,
+`X-Ratelimit-Limit-Tokens`, and `X-Ratelimit-Remaining-Tokens`. The proxy stores
+those counters on the credential. When either remaining value reaches 0, the
+account enters the configured maximum cooldown, sticky bindings are cleared, and
+later turns pick another account. The current successful response is still
+returned so the turn is not aborted mid-stream. This reduces the free-tier
+follow-up error `Forbidden: Access to the chat endpoint is denied`.
 
 Each generation request snapshots only a lightweight credential candidate list
 once, then reloads the selected full credential before it uses a token. This
