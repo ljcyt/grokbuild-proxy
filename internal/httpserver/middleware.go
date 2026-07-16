@@ -11,6 +11,7 @@ import (
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/anthropic"
 	"github.com/GreyGunG/grokbuild-proxy/internal/openai"
+	"github.com/GreyGunG/grokbuild-proxy/internal/requestidentity"
 )
 
 // ClientAuthenticator validates client API keys (not admin).
@@ -18,6 +19,13 @@ type ClientAuthenticator interface {
 	// AuthenticateClient returns true when the plaintext key is a valid client key.
 	// Bootstrap api_key and hashed client keys both count.
 	AuthenticateClient(plaintext string) (ok bool, err error)
+}
+
+// ClientIdentityAuthenticator optionally returns the durable local client ID
+// after authenticating a plaintext key. The ID is safe to carry in context and
+// lets protocol handlers namespace upstream prompt-cache keys.
+type ClientIdentityAuthenticator interface {
+	AuthenticateClientID(plaintext string) (clientID string, ok bool, err error)
 }
 
 // Middleware holds shared middleware dependencies.
@@ -107,7 +115,14 @@ func (m *Middleware) RequireClient(next http.Handler) http.Handler {
 			writeRouteError(w, r, http.StatusServiceUnavailable, "auth not configured")
 			return
 		}
-		ok, err := m.Clients.AuthenticateClient(key)
+		var clientID string
+		var ok bool
+		var err error
+		if identityAuthenticator, supportsIdentity := m.Clients.(ClientIdentityAuthenticator); supportsIdentity {
+			clientID, ok, err = identityAuthenticator.AuthenticateClientID(key)
+		} else {
+			ok, err = m.Clients.AuthenticateClient(key)
+		}
 		if err != nil {
 			writeRouteError(w, r, http.StatusInternalServerError, "auth lookup failed")
 			return
@@ -115,6 +130,9 @@ func (m *Middleware) RequireClient(next http.Handler) http.Handler {
 		if !ok {
 			writeRouteError(w, r, http.StatusUnauthorized, "invalid api key")
 			return
+		}
+		if clientID != "" {
+			r = r.WithContext(requestidentity.WithClientID(r.Context(), clientID))
 		}
 		next.ServeHTTP(w, r)
 	})

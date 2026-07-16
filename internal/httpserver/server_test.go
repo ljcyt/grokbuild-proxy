@@ -16,6 +16,8 @@ import (
 	"github.com/GreyGunG/grokbuild-proxy/internal/admin"
 	"github.com/GreyGunG/grokbuild-proxy/internal/anthropic"
 	"github.com/GreyGunG/grokbuild-proxy/internal/config"
+	"github.com/GreyGunG/grokbuild-proxy/internal/openai"
+	"github.com/GreyGunG/grokbuild-proxy/internal/requestidentity"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 	"github.com/GreyGunG/grokbuild-proxy/internal/upstream"
 )
@@ -132,6 +134,30 @@ func TestMiddlewareAcceptsAPIKey(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "object") {
 		t.Fatalf("body=%s", rr.Body.String())
+	}
+}
+
+func TestMiddlewareProvidesAuthenticatedClientIdentity(t *testing.T) {
+	var gotClientID string
+	h := New(Options{
+		Config: config.Default(),
+		Store: stubClientStore{keys: map[string]storage.ClientKey{
+			"sk-api-good": {ID: "client-test"},
+		}},
+		OpenAI: &openai.Handlers{Post: func(ctx context.Context, _ string, _ string, _ []byte, _ bool) (*http.Response, error) {
+			gotClientID = requestidentity.ClientID(ctx)
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"resp","model":"grok-4.5","output":[]}`))}, nil
+		}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"grok-4.5","input":"hello"}`))
+	req.Header.Set("Authorization", "Bearer sk-api-good")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if gotClientID != "client-test" {
+		t.Fatalf("client id=%q", gotClientID)
 	}
 }
 

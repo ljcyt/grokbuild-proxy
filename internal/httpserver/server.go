@@ -55,15 +55,23 @@ type clientAuth struct {
 }
 
 func (c clientAuth) AuthenticateClient(plaintext string) (bool, error) {
+	_, ok, err := c.AuthenticateClientID(plaintext)
+	return ok, err
+}
+
+func (c clientAuth) AuthenticateClientID(plaintext string) (string, bool, error) {
 	plaintext = strings.TrimSpace(plaintext)
 	if plaintext == "" {
-		return false, nil
+		return "", false, nil
 	}
 	if c.store == nil {
-		return false, nil
+		return "", false, nil
 	}
-	_, ok, err := c.store.LookupClientByPlaintext(plaintext)
-	return ok, err
+	client, ok, err := c.store.LookupClientByPlaintext(plaintext)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	return client.ID, true, nil
 }
 
 // New builds the root http.Handler.

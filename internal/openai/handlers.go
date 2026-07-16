@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/lb"
+	"github.com/GreyGunG/grokbuild-proxy/internal/promptcache"
+	"github.com/GreyGunG/grokbuild-proxy/internal/requestidentity"
 )
 
 // HandleResponses serves POST /v1/responses.
@@ -45,6 +47,14 @@ func (h *Handlers) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, "failed to encode request", "server_error", "encode_error")
 		return
+	}
+	sanitized, cacheKey, err := promptcache.Apply(sanitized, requestidentity.ClientID(r.Context()), resolvedModel, res.ConvID)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "failed to derive prompt cache key", "server_error", "prompt_cache_error")
+		return
+	}
+	if cacheKey != "" {
+		res.ConvID = cacheKey
 	}
 
 	resp, err := h.Post(r.Context(), resolvedModel, res.ConvID, sanitized, res.Stream)
@@ -111,6 +121,14 @@ func (h *Handlers) HandleChatCompletions(w http.ResponseWriter, r *http.Request)
 	convID := sanitizedRes.ConvID
 	if convID == "" {
 		convID = convHint
+	}
+	sanitized, cacheKey, err := promptcache.Apply(sanitized, requestidentity.ClientID(r.Context()), model, convID)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "failed to derive prompt cache key", "server_error", "prompt_cache_error")
+		return
+	}
+	if cacheKey != "" {
+		convID = cacheKey
 	}
 
 	resp, err := h.Post(r.Context(), model, convID, sanitized, stream)

@@ -12,6 +12,8 @@ import (
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/config"
 	"github.com/GreyGunG/grokbuild-proxy/internal/lb"
+	"github.com/GreyGunG/grokbuild-proxy/internal/promptcache"
+	"github.com/GreyGunG/grokbuild-proxy/internal/requestidentity"
 )
 
 // PostResponsesFunc posts a Responses body to upstream and returns the raw HTTP response.
@@ -89,6 +91,14 @@ func (h *Handlers) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	body, cacheKey, err := promptcache.Apply(body, requestidentity.ClientID(r.Context()), resolved, convID)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "failed to derive prompt cache key")
+		return
+	}
+	if cacheKey != "" {
+		convID = cacheKey
 	}
 
 	resp, err := h.Post(r.Context(), resolved, convID, body, stream)

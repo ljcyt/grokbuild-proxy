@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/lb"
+	"github.com/GreyGunG/grokbuild-proxy/internal/requestidentity"
 )
 
 func TestSanitizeResponses_PreserveReasoningAndAggregateSystem(t *testing.T) {
@@ -571,6 +572,39 @@ func TestHandleResponses_ResolvesConfiguredAlias(t *testing.T) {
 	}
 	if got := asString(posted["model"]); got != "grok-4.5" {
 		t.Fatalf("body model=%q", got)
+	}
+}
+
+func TestHandleResponsesDerivesIsolatedPromptCacheKey(t *testing.T) {
+	keys := make([]string, 0, 3)
+	convIDs := make([]string, 0, 3)
+	h := &Handlers{Post: func(_ context.Context, _ string, convID string, body []byte, _ bool) (*http.Response, error) {
+		var request map[string]any
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, asString(request["prompt_cache_key"]))
+		convIDs = append(convIDs, convID)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"resp","model":"grok-4.5","output":[]}`))}, nil
+	}}
+	call := func(clientID, input string) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(input))
+		req = req.WithContext(requestidentity.WithClientID(req.Context(), clientID))
+		rr := httptest.NewRecorder()
+		h.HandleResponses(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	}
+	call("client-a", `{"model":"grok-4.5","input":[{"role":"user","content":"first"}]}`)
+	call("client-a", `{"model":"grok-4.5","input":[{"role":"user","content":"first"},{"role":"assistant","content":"answer"},{"role":"user","content":"next"}]}`)
+	call("client-b", `{"model":"grok-4.5","input":[{"role":"user","content":"first"}]}`)
+
+	if keys[0] == "" || keys[0] != keys[1] || keys[0] == keys[2] {
+		t.Fatalf("cache keys=%q", keys)
+	}
+	if convIDs[0] != keys[0] || convIDs[1] != keys[1] || convIDs[2] != keys[2] {
+		t.Fatalf("sticky ids=%q keys=%q", convIDs, keys)
 	}
 }
 

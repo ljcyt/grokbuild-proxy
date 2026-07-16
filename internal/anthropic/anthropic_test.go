@@ -12,6 +12,7 @@ import (
 
 	"github.com/GreyGunG/grokbuild-proxy/internal/config"
 	"github.com/GreyGunG/grokbuild-proxy/internal/lb"
+	"github.com/GreyGunG/grokbuild-proxy/internal/requestidentity"
 	"github.com/GreyGunG/grokbuild-proxy/internal/upstream"
 )
 
@@ -795,6 +796,33 @@ func TestHandleMessages_NonStream(t *testing.T) {
 	}
 	if msg.Model != "claude-sonnet-4" {
 		t.Fatalf("model=%q", msg.Model)
+	}
+}
+
+func TestHandleMessagesDerivesIsolatedPromptCacheKey(t *testing.T) {
+	var cacheKey string
+	var convID string
+	h := &Handlers{
+		Cfg: config.Default().Anthropic,
+		Post: func(_ context.Context, _ string, gotConvID string, body []byte, _ bool) (*http.Response, error) {
+			var request map[string]any
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Fatal(err)
+			}
+			cacheKey = request["prompt_cache_key"].(string)
+			convID = gotConvID
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"resp","model":"grok-4.5","output":[]}`))}, nil
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}`))
+	req = req.WithContext(requestidentity.WithClientID(req.Context(), "client-a"))
+	rr := httptest.NewRecorder()
+	h.HandleMessages(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if cacheKey == "" || convID != cacheKey {
+		t.Fatalf("cache key=%q convID=%q", cacheKey, convID)
 	}
 }
 
