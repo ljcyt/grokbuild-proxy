@@ -1,15 +1,15 @@
 /* grokbuild Admin — dark ops console (kiro-inspired density, no framework) */
 
 :root {
-  --bg: #242424;
-  --bg-elev: #2b2b2b;
-  --bg-soft: #333333;
-  --border: #454545;
-  --border-strong: #5a5a5a;
-  --text: #f2f2f2;
-  --muted: #b8b8b8;
-  --primary: #3d7be0;
-  --primary-hover: #4a6078;
+  --bg: #f6f7fb;
+  --bg-elev: #ffffff;
+  --bg-soft: #f1f3f9;
+  --border: #e4e7f0;
+  --border-strong: #d3d9e8;
+  --text: #17213a;
+  --muted: #71809a;
+  --primary: #6256e8;
+  --primary-hover: #4c42ca;
   --primary-fg: #ffffff;
   --ok: #70c799;
   --ok-bg: rgba(112, 199, 153, 0.14);
@@ -17,7 +17,7 @@
   --warn-bg: rgba(228, 188, 98, 0.14);
   --danger: #ee8c8c;
   --danger-bg: rgba(238, 140, 140, 0.14);
-  --ghost: #3a3a3a;
+  --ghost: #ffffff;
   --radius: 6px;
   --shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
   --font: "Segoe UI", ui-sans-serif, system-ui, -apple-system, "PingFang SC",
@@ -913,3 +913,16 @@ td code {
     grid-template-columns: 1fr;
   }
 }
+
+/* Light operational dashboard, aligned with the account-management view. */
+.topbar { background: rgba(255,255,255,.94); backdrop-filter: blur(12px); }
+.brand-mark { background: #6256e8; }
+.nav a.active { color: #fff; background: #6256e8; border-color: #6256e8; }
+.nav a:hover { background: #f0efff; color: #4c42ca; }
+.dashboard-body { gap: 16px; }
+.dashboard-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.dashboard-metric, .dashboard-panel { box-shadow: 0 8px 24px rgba(34,48,89,.05); }
+.dashboard-metric { min-height: 126px; padding: 18px; border-top: 2px solid #dedcfb; }
+.dashboard-metric-value { font-size: 26px; }
+.dashboard-panel { padding: 18px; }
+@media (max-width: 900px) { .dashboard-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

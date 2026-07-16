@@ -81,17 +81,17 @@ func TestCredentialListUsesPaginationWithoutBillingFanout(t *testing.T) {
 	}
 }
 
-func TestAdminThemeUsesCompactGrayPalette(t *testing.T) {
+func TestAdminThemeUsesLightOperationsPalette(t *testing.T) {
 	css, err := ReadStatic("app.css")
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := string(css)
 	for _, marker := range []string{
-		"--bg: #242424",
-		"--bg-elev: #2b2b2b",
-		"--ghost: #3a3a3a",
-		"--primary: #3d7be0",
+		"--bg: #f6f7fb",
+		"--bg-elev: #ffffff",
+		"--ghost: #ffffff",
+		"--primary: #6256e8",
 		"background: var(--primary-hover)",
 	} {
 		if !strings.Contains(source, marker) {

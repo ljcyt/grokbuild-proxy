@@ -127,6 +127,9 @@ func New(opts Options) http.Handler {
 	// Client-authenticated API.
 	api := http.NewServeMux()
 	if opts.OpenAI != nil {
+		if opts.OpenAI.ObserveUsage == nil {
+			opts.OpenAI.ObserveUsage = metrics.AddUsage
+		}
 		api.HandleFunc("POST /v1/responses", opts.OpenAI.HandleResponses)
 		api.HandleFunc("POST /v1/responses/compact", opts.OpenAI.HandleResponsesCompact)
 		api.HandleFunc("POST /v1/chat/completions", opts.OpenAI.HandleChatCompletions)

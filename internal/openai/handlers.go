@@ -71,7 +71,7 @@ func (h *Handlers) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		streamUpstreamSSE(w, resp, requestedModel)
 		return
 	}
-	proxyUpstreamJSON(w, resp, requestedModel)
+	proxyUpstreamJSON(w, resp, requestedModel, h.ObserveUsage)
 }
 
 // HandleResponsesCompact serves POST /v1/responses/compact. It shares request
@@ -130,7 +130,7 @@ func (h *Handlers) HandleResponsesCompact(w http.ResponseWriter, r *http.Request
 		WriteError(w, http.StatusBadGateway, "upstream returned nil response", "server_error", "upstream_error")
 		return
 	}
-	proxyUpstreamJSON(w, resp, requestedModel)
+	proxyUpstreamJSON(w, resp, requestedModel, h.ObserveUsage)
 }
 
 // HandleChatCompletions serves POST /v1/chat/completions.
@@ -215,6 +215,10 @@ func (h *Handlers) HandleChatCompletions(w http.ResponseWriter, r *http.Request)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		MapUpstreamError(w, resp.StatusCode, upRaw)
 		return
+	}
+	if h.ObserveUsage != nil {
+		input, cached, output, reasoning := responseUsage(upRaw)
+		h.ObserveUsage(input, cached, output, reasoning)
 	}
 	chatRaw, err := ResponsesToChatWithModel(upRaw, requestedModel)
 	if err != nil {

@@ -317,8 +317,8 @@
     var successRate = requests ? ((num(metrics.success_total) / requests) * 100).toFixed(1) + "%" : "--";
     var metricGrid = el("div", "dashboard-metrics");
     metricGrid.appendChild(dashboardMetric("总请求", num(requests).toLocaleString(), "错误 " + num(metrics.errors_total), ""));
+    metricGrid.appendChild(dashboardMetric("总消耗 Token", num(metrics.tokens_total).toLocaleString(), "输入 " + num(metrics.input_tokens_total).toLocaleString() + " · 输出 " + num(metrics.output_tokens_total).toLocaleString(), "ok"));
     metricGrid.appendChild(dashboardMetric("成功率", successRate, "平均延迟 " + Math.round(num(metrics.avg_latency_ms)) + " ms", num(metrics.error_rate) > 0.05 ? "warn" : "ok"));
-    metricGrid.appendChild(dashboardMetric("进行中", num(metrics.inflight), "响应 " + formatBytes(num(metrics.response_bytes_total)), ""));
     metricGrid.appendChild(dashboardMetric("账号可用", num(pool.available) + " / " + num(pool.total), "冷却 " + num(pool.cooling) + " · 禁用 " + num(pool.disabled), num(pool.available) ? "ok" : "danger"));
     host.appendChild(metricGrid);
 

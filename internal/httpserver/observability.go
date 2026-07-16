@@ -25,11 +25,34 @@ func RequestIDFromContext(ctx context.Context) string {
 
 // Metrics contains low-cardinality process counters.
 type Metrics struct {
-	requests      atomic.Uint64
-	errors        atomic.Uint64
-	inflight      atomic.Int64
-	responseBytes atomic.Uint64
-	durationNanos atomic.Uint64
+	requests        atomic.Uint64
+	errors          atomic.Uint64
+	inflight        atomic.Int64
+	responseBytes   atomic.Uint64
+	durationNanos   atomic.Uint64
+	inputTokens     atomic.Uint64
+	cachedTokens    atomic.Uint64
+	outputTokens    atomic.Uint64
+	reasoningTokens atomic.Uint64
+}
+
+// AddUsage records tokens reported by a completed upstream response.
+func (m *Metrics) AddUsage(input, cached, output, reasoning int64) {
+	if m == nil {
+		return
+	}
+	if input > 0 {
+		m.inputTokens.Add(uint64(input))
+	}
+	if cached > 0 {
+		m.cachedTokens.Add(uint64(cached))
+	}
+	if output > 0 {
+		m.outputTokens.Add(uint64(output))
+	}
+	if reasoning > 0 {
+		m.reasoningTokens.Add(uint64(reasoning))
+	}
 }
 
 // Snapshot returns a stable, JSON-safe view for the local admin dashboard.
@@ -48,13 +71,18 @@ func (m *Metrics) Snapshot() map[string]any {
 		errorRate = float64(errors) / float64(requests)
 	}
 	return map[string]any{
-		"requests_total":       requests,
-		"errors_total":         errors,
-		"success_total":        requests - errors,
-		"inflight":             m.inflight.Load(),
-		"response_bytes_total": m.responseBytes.Load(),
-		"avg_latency_ms":       avgLatencyMS,
-		"error_rate":           errorRate,
+		"requests_total":         requests,
+		"errors_total":           errors,
+		"success_total":          requests - errors,
+		"inflight":               m.inflight.Load(),
+		"response_bytes_total":   m.responseBytes.Load(),
+		"avg_latency_ms":         avgLatencyMS,
+		"error_rate":             errorRate,
+		"input_tokens_total":     m.inputTokens.Load(),
+		"cached_tokens_total":    m.cachedTokens.Load(),
+		"output_tokens_total":    m.outputTokens.Load(),
+		"reasoning_tokens_total": m.reasoningTokens.Load(),
+		"tokens_total":           m.inputTokens.Load() + m.outputTokens.Load(),
 	}
 }
 

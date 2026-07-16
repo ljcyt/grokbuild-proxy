@@ -31,6 +31,8 @@ type Handlers struct {
 	// PostCompact performs the upstream Responses compact call. When unset,
 	// /v1/responses/compact returns an explicit not-implemented error.
 	PostCompact PostResponsesFunc
+	// ObserveUsage receives successfully completed non-stream upstream usage.
+	ObserveUsage func(input, cached, output, reasoning int64)
 	// ResolveModel maps a client-facing alias to an upstream Grok model. If nil,
 	// the requested model is sent unchanged.
 	ResolveModel func(string) string
@@ -105,7 +107,7 @@ func writeJSON(w http.ResponseWriter, status int, raw []byte) {
 }
 
 // proxyUpstreamJSON copies a non-stream upstream response to the client.
-func proxyUpstreamJSON(w http.ResponseWriter, resp *http.Response, requestedModel string) {
+func proxyUpstreamJSON(w http.ResponseWriter, resp *http.Response, requestedModel string, observe func(int64, int64, int64, int64)) {
 	defer resp.Body.Close()
 	copyUpstreamResponseHeaders(w.Header(), resp.Header)
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -117,6 +119,10 @@ func proxyUpstreamJSON(w http.ResponseWriter, resp *http.Response, requestedMode
 		MapUpstreamError(w, resp.StatusCode, raw)
 		return
 	}
+	if observe != nil {
+		input, cached, output, reasoning := responseUsage(raw)
+		observe(input, cached, output, reasoning)
+	}
 	raw = rewriteResponseModel(raw, requestedModel)
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
@@ -125,6 +131,48 @@ func proxyUpstreamJSON(w http.ResponseWriter, resp *http.Response, requestedMode
 	w.Header().Set("Content-Type", ct)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(raw)
+}
+
+func responseUsage(raw []byte) (input, cached, output, reasoning int64) {
+	var value struct {
+		Usage struct {
+			InputTokens      int64 `json:"input_tokens"`
+			OutputTokens     int64 `json:"output_tokens"`
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+			InputDetails     struct {
+				CachedTokens int64 `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
+			PromptDetails struct {
+				CachedTokens int64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			OutputDetails struct {
+				ReasoningTokens int64 `json:"reasoning_tokens"`
+			} `json:"output_tokens_details"`
+			CompletionDetails struct {
+				ReasoningTokens int64 `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(raw, &value) != nil {
+		return
+	}
+	input, output = value.Usage.InputTokens, value.Usage.OutputTokens
+	if input == 0 {
+		input = value.Usage.PromptTokens
+	}
+	if output == 0 {
+		output = value.Usage.CompletionTokens
+	}
+	cached = value.Usage.InputDetails.CachedTokens
+	if cached == 0 {
+		cached = value.Usage.PromptDetails.CachedTokens
+	}
+	reasoning = value.Usage.OutputDetails.ReasoningTokens
+	if reasoning == 0 {
+		reasoning = value.Usage.CompletionDetails.ReasoningTokens
+	}
+	return
 }
 
 // streamUpstreamSSE copies upstream SSE to the client with Flush.
