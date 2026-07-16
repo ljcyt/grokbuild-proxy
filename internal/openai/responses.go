@@ -28,6 +28,9 @@ const DefaultMaxBody int64 = 20 << 20
 type Handlers struct {
 	// Post performs the upstream Responses call. Required.
 	Post PostResponsesFunc
+	// PostCompact performs the upstream Responses compact call. When unset,
+	// /v1/responses/compact returns an explicit not-implemented error.
+	PostCompact PostResponsesFunc
 	// ResolveModel maps a client-facing alias to an upstream Grok model. If nil,
 	// the requested model is sent unchanged.
 	ResolveModel func(string) string

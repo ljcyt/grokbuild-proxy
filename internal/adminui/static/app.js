@@ -19,6 +19,9 @@
     credentialSearchTimer: null,
     credentialLoadSequence: 0,
     inspectionPollSequence: 0,
+    dashboard: null,
+    dashboardRefreshTimer: null,
+    dashboardLoadSequence: 0,
     busy: false,
   };
 
@@ -166,12 +169,12 @@
   function parseRoute() {
     var hash = (location.hash || "").replace(/^#\/?/, "");
     var name = (hash.split("?")[0] || "").split("/")[0] || "";
-    if (!name) name = state.key ? "credentials" : "login";
+    if (!name) name = state.key ? "dashboard" : "login";
     return name;
   }
 
   function navigate(route) {
-    if (!route) route = "credentials";
+    if (!route) route = "dashboard";
     location.hash = "#/" + route;
   }
 
@@ -205,12 +208,15 @@
 
     setActiveNav(route);
     show($("page-credentials"), route === "credentials");
+    show($("page-dashboard"), route === "dashboard");
     show($("page-clients"), route === "clients");
     show($("page-settings"), route === "settings");
     show($("page-system"), route === "system");
     show($("page-integration"), route === "integration");
 
-    if (route === "credentials") loadCredentials();
+    stopDashboardRefresh();
+    if (route === "dashboard") loadDashboard();
+    else if (route === "credentials") loadCredentials();
     else if (route === "clients") loadClients();
     else if (route === "settings") loadSettings();
     else if (route === "system") loadSystem();
@@ -244,7 +250,7 @@
         state.system = sys;
         setText($("shell-version"), (sys && sys.version) || "管理后台");
         toast("登录成功", "ok");
-        navigate("credentials");
+        navigate("dashboard");
         render();
       })
       .catch(function (err) {
@@ -255,6 +261,125 @@
       .finally(function () {
         if (btn) btn.disabled = false;
       });
+  }
+
+  // ---------- Dashboard ----------
+
+  function stopDashboardRefresh() {
+    if (state.dashboardRefreshTimer) {
+      clearTimeout(state.dashboardRefreshTimer);
+      state.dashboardRefreshTimer = null;
+    }
+  }
+
+  function loadDashboard() {
+    var host = $("dashboard-body");
+    if (!host) return;
+    stopDashboardRefresh();
+    var sequence = ++state.dashboardLoadSequence;
+    if (!state.dashboard) {
+      clear(host);
+      host.appendChild(el("p", "muted", "加载运行概览…"));
+    }
+    api("GET", "/admin/dashboard")
+      .then(function (data) {
+        if (sequence !== state.dashboardLoadSequence || state.route !== "dashboard") return;
+        state.dashboard = data || {};
+        renderDashboard(state.dashboard);
+        setText($("dashboard-updated"), data && data.generated_at ? "更新于 " + fmtTime(data.generated_at) : "");
+        stopDashboardRefresh();
+        state.dashboardRefreshTimer = setTimeout(function () {
+          if (state.route === "dashboard") loadDashboard();
+        }, 10000);
+      })
+      .catch(function (err) {
+        if (sequence !== state.dashboardLoadSequence || state.route !== "dashboard") return;
+        clear(host);
+        host.appendChild(el("p", "error", "运行看板加载失败: " + err.message));
+      });
+  }
+
+  function dashboardMetric(label, value, detail, tone) {
+    var item = el("section", "dashboard-metric" + (tone ? " " + tone : ""));
+    item.appendChild(el("p", "dashboard-metric-label", label));
+    item.appendChild(el("strong", "dashboard-metric-value", value));
+    if (detail) item.appendChild(el("p", "dashboard-metric-detail", detail));
+    return item;
+  }
+
+  function renderDashboard(data) {
+    var host = $("dashboard-body");
+    if (!host) return;
+    clear(host);
+    var metrics = data.metrics || {};
+    var pool = data.pool || {};
+    var requests = num(metrics.requests_total);
+    var successRate = requests ? ((num(metrics.success_total) / requests) * 100).toFixed(1) + "%" : "--";
+    var metricGrid = el("div", "dashboard-metrics");
+    metricGrid.appendChild(dashboardMetric("总请求", num(requests).toLocaleString(), "错误 " + num(metrics.errors_total), ""));
+    metricGrid.appendChild(dashboardMetric("成功率", successRate, "平均延迟 " + Math.round(num(metrics.avg_latency_ms)) + " ms", num(metrics.error_rate) > 0.05 ? "warn" : "ok"));
+    metricGrid.appendChild(dashboardMetric("进行中", num(metrics.inflight), "响应 " + formatBytes(num(metrics.response_bytes_total)), ""));
+    metricGrid.appendChild(dashboardMetric("账号可用", num(pool.available) + " / " + num(pool.total), "冷却 " + num(pool.cooling) + " · 禁用 " + num(pool.disabled), num(pool.available) ? "ok" : "danger"));
+    host.appendChild(metricGrid);
+
+    var panels = el("div", "dashboard-panels");
+    var capacity = el("section", "dashboard-panel");
+    capacity.appendChild(el("h3", "", "账号池容量"));
+    var capacityList = el("dl", "dashboard-kv");
+    addKV(capacityList, "已启用", num(pool.enabled));
+    addKV(capacityList, "冷却中", num(pool.cooling));
+    addKV(capacityList, "令牌过期", num(pool.expired));
+    addKV(capacityList, "缺少凭据", num(pool.missing_tokens));
+    addKV(capacityList, "下次恢复", pool.next_recovery_at ? fmtTime(pool.next_recovery_at) : "--");
+    addKV(capacityList, "最近成功", pool.last_success_at ? fmtTime(pool.last_success_at) : "--");
+    capacity.appendChild(capacityList);
+    panels.appendChild(capacity);
+
+    var inspection = data.inspection || {};
+    var inspectPanel = el("section", "dashboard-panel");
+    inspectPanel.appendChild(el("h3", "", "凭证巡检"));
+    var inspectList = el("dl", "dashboard-kv");
+    addKV(inspectList, "服务", inspection.available ? "已配置" : "未配置");
+    addKV(inspectList, "当前状态", inspection.running ? "巡检中" : inspection.has_run ? "空闲" : "尚未执行");
+    var last = inspection.last || {};
+    if (inspection.has_run) {
+      addKV(inspectList, "上次完成", last.finished_at ? fmtTime(last.finished_at) : "--");
+      addKV(inspectList, "正常 / 检测", num(last.healthy) + " / " + num(last.inspected));
+      addKV(inspectList, "限流 / 隔离", num(last.rate_limited) + " / " + num(last.quarantined));
+    }
+    inspectPanel.appendChild(inspectList);
+    panels.appendChild(inspectPanel);
+    host.appendChild(panels);
+
+    var issues = data.recent_issues || [];
+    var issuePanel = el("section", "dashboard-panel dashboard-issues");
+    issuePanel.appendChild(el("h3", "", "近期异常账号"));
+    if (!issues.length) {
+      issuePanel.appendChild(el("p", "muted", "当前没有需要处理的账号异常。"));
+    } else {
+      var list = el("div", "dashboard-issue-list");
+      issues.forEach(function (issue) {
+        var row = el("div", "dashboard-issue");
+        var title = issue.name || issue.id || "未命名账号";
+        row.appendChild(el("strong", "", title));
+        var detail = issue.last_error || issue.inspection_status || issue.lifecycle_state || (issue.enabled ? "冷却中" : "已禁用");
+        row.appendChild(el("span", "muted", detail));
+        list.appendChild(row);
+      });
+      issuePanel.appendChild(list);
+    }
+    host.appendChild(issuePanel);
+  }
+
+  function formatBytes(value) {
+    if (!value) return "0 B";
+    var units = ["B", "KB", "MB", "GB"];
+    var index = 0;
+    while (value >= 1024 && index < units.length - 1) {
+      value /= 1024;
+      index++;
+    }
+    return (index ? value.toFixed(1) : Math.round(value)) + " " + units[index];
   }
 
   // ---------- Format helpers ----------
@@ -1708,6 +1833,9 @@
     var credRefresh = $("btn-cred-refresh-list");
     if (credRefresh) credRefresh.addEventListener("click", loadCredentials);
 
+    var dashboardRefresh = $("btn-dashboard-refresh");
+    if (dashboardRefresh) dashboardRefresh.addEventListener("click", loadDashboard);
+
     var credentialSearch = $("credential-search");
     if (credentialSearch) {
       credentialSearch.addEventListener("input", function () {
@@ -1784,7 +1912,7 @@
           state.system = sys;
           setText($("shell-version"), (sys && sys.version) || "管理后台");
           if (!location.hash || location.hash === "#" || location.hash === "#/") {
-            navigate("credentials");
+            navigate("dashboard");
           }
           render();
         })

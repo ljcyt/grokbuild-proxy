@@ -97,6 +97,8 @@ type Handlers struct {
 	TokenCache    tokenCacheInvalidator
 	Imports       ImportJobService
 	Inspection    InspectionService
+	// DashboardData supplies process counters without creating an admin-to-HTTP import cycle.
+	DashboardData func() map[string]any
 	Config        config.Config
 	// AdminKey is the plaintext admin bearer secret (process-local).
 	AdminKey string
@@ -1205,6 +1207,47 @@ func (h *Handlers) System(w http.ResponseWriter, r *http.Request) {
 		},
 		"limits": h.Config.Limits,
 		"pool":   summarizePool(credentials, time.Now()),
+	})
+}
+
+// Dashboard GET /admin/dashboard returns bounded operational aggregates only.
+func (h *Handlers) Dashboard(w http.ResponseWriter, r *http.Request) {
+	credentials, err := h.Store.ListCredentials()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "credential store unavailable")
+		return
+	}
+	now := time.Now()
+	recentIssues := make([]map[string]any, 0, 8)
+	for _, credential := range credentials {
+		if len(recentIssues) >= 8 {
+			break
+		}
+		if credential.Enabled && credential.LastError == "" && credential.LastInspectionStatus != "unauthorized" && credential.LastInspectionStatus != "error" && (credential.CooldownUntil == nil || !credential.CooldownUntil.After(now)) {
+			continue
+		}
+		recentIssues = append(recentIssues, map[string]any{
+			"id": credential.ID, "name": credential.Name, "enabled": credential.Enabled,
+			"lifecycle_state": credential.LifecycleState, "last_error": credential.LastError,
+			"inspection_status": credential.LastInspectionStatus, "cooldown_until": credential.CooldownUntil,
+		})
+	}
+	metrics := map[string]any{}
+	if h.DashboardData != nil {
+		metrics = h.DashboardData()
+	}
+	inspection := map[string]any{"available": h.Inspection != nil}
+	if h.Inspection != nil {
+		last, hasRun := h.Inspection.Last()
+		inspection["running"] = h.Inspection.Running()
+		inspection["has_run"] = hasRun
+		if hasRun {
+			inspection["last"] = last
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"generated_at": now.UTC(), "version": h.version(), "pool": summarizePool(credentials, now),
+		"metrics": metrics, "inspection": inspection, "recent_issues": recentIssues,
 	})
 }
 

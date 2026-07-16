@@ -68,6 +68,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 
 	// System
 	mux.HandleFunc("GET /admin/system", h.System)
+	mux.HandleFunc("GET /admin/dashboard", h.Dashboard)
 
 	// Fallback for non-pattern muxes / unexpected method combos.
 	mux.HandleFunc("/admin/", h.dispatchFallback)
@@ -110,6 +111,8 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 		h.CreateClient(w, r)
 	case path == "/admin/system" && r.Method == http.MethodGet:
 		h.System(w, r)
+	case path == "/admin/dashboard" && r.Method == http.MethodGet:
+		h.Dashboard(w, r)
 	default:
 		// /admin/credentials/{id}/...
 		if id, rest, ok := cutAfterPrefix(path, "/admin/credentials/"); ok {

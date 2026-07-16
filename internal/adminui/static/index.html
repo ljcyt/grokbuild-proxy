@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
   <title>grokbuild 管理后台</title>
-  <link rel="stylesheet" href="/admin/ui/app.css?v=5" />
+  <link rel="stylesheet" href="/admin/ui/app.css?v=6" />
 </head>
 <body>
   <div id="app">
@@ -37,6 +37,7 @@
           </div>
         </div>
         <nav class="nav" id="main-nav" aria-label="主导航">
+          <a href="#/dashboard" data-route="dashboard">运行看板</a>
           <a href="#/credentials" data-route="credentials">账号凭证</a>
           <a href="#/clients" data-route="clients">客户端密钥</a>
           <a href="#/settings" data-route="settings">运行设置</a>
@@ -48,6 +49,20 @@
 
       <main class="main">
         <div id="toast-host" class="toast-host" aria-live="polite"></div>
+
+        <section id="page-dashboard" class="page hidden">
+          <div class="page-head">
+            <div>
+              <h2>运行看板</h2>
+              <p class="muted">请求运行情况、账号池容量与巡检异常概览</p>
+            </div>
+            <div class="row gap">
+              <span id="dashboard-updated" class="muted"></span>
+              <button type="button" class="btn" id="btn-dashboard-refresh">刷新</button>
+            </div>
+          </div>
+          <div id="dashboard-body" class="dashboard-body"></div>
+        </section>
 
         <section id="page-credentials" class="page hidden">
           <div class="page-head">
@@ -179,6 +194,6 @@
     </div>
   </div>
 
-  <script src="/admin/ui/app.js?v=8" defer></script>
+  <script src="/admin/ui/app.js?v=9" defer></script>
 </body>
 </html>

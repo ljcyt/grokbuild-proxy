@@ -128,6 +128,7 @@ func New(opts Options) http.Handler {
 	api := http.NewServeMux()
 	if opts.OpenAI != nil {
 		api.HandleFunc("POST /v1/responses", opts.OpenAI.HandleResponses)
+		api.HandleFunc("POST /v1/responses/compact", opts.OpenAI.HandleResponsesCompact)
 		api.HandleFunc("POST /v1/chat/completions", opts.OpenAI.HandleChatCompletions)
 	}
 	if opts.Anthropic != nil && opts.Config.Anthropic.Enabled {
@@ -155,6 +156,9 @@ func New(opts Options) http.Handler {
 		opts.Admin.Config = opts.Config
 		if opts.Version != "" {
 			opts.Admin.Version = opts.Version
+		}
+		if opts.Admin.DashboardData == nil {
+			opts.Admin.DashboardData = metrics.Snapshot
 		}
 		mux.Handle("/admin/", opts.Admin.Handler())
 	}

@@ -197,6 +197,7 @@ func main() {
 
 	oai := &openai.Handlers{
 		Post:         exec.Post,
+		PostCompact:  exec.PostCompact,
 		MaxBody:      cfg.Limits.MaxBodyBytes,
 		ResolveModel: cfg.ResolveModel,
 	}

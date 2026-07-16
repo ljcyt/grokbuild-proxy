@@ -161,6 +161,25 @@ func TestMiddlewareProvidesAuthenticatedClientIdentity(t *testing.T) {
 	}
 }
 
+func TestResponsesCompactRouteUsesCompactHandler(t *testing.T) {
+	called := false
+	h := New(Options{
+		Config: config.Default(),
+		Store:  stubClientStore{keys: map[string]storage.ClientKey{"sk-api-good": {ID: "client-test"}}},
+		OpenAI: &openai.Handlers{PostCompact: func(context.Context, string, string, []byte, bool) (*http.Response, error) {
+			called = true
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"cmp","model":"grok-4.5","output":[]}`))}, nil
+		}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"grok-4.5","input":"hello"}`))
+	req.Header.Set("Authorization", "Bearer sk-api-good")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if !called || rr.Code != http.StatusOK {
+		t.Fatalf("called=%v status=%d body=%s", called, rr.Code, rr.Body.String())
+	}
+}
+
 func TestModelsOnlyAdvertisesConfiguredModelsAndUsableAliases(t *testing.T) {
 	cfg := config.Default()
 	h := New(Options{

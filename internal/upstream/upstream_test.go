@@ -425,6 +425,34 @@ func TestPostResponses_DoesNotConsumeBody(t *testing.T) {
 	}
 }
 
+func TestPostResponsesCompact_UsesCompactPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses/compact" {
+			t.Errorf("method=%s path=%s", r.Method, r.URL.Path)
+		}
+		assertGrokHeaders(t, r, "grok-4.5")
+		if r.Header.Get("x-grok-conv-id") != "compact-conv" {
+			t.Errorf("conv=%q", r.Header.Get("x-grok-conv-id"))
+		}
+		if r.Header.Get("Accept") != "application/json" {
+			t.Errorf("accept=%q", r.Header.Get("Accept"))
+		}
+		_, _ = w.Write([]byte(`{"id":"cmp_1","model":"grok-4.5"}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient(Config{BaseURL: srv.URL + "/v1", HTTPClient: srv.Client()})
+	resp, err := c.PostResponsesCompact(context.Background(), []byte(`{"model":"grok-4.5","input":"hello"}`), PostResponsesOptions{
+		AccessToken: "tok", ConvID: "compact-conv", Stream: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+}
+
 func TestPostResponsesJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertGrokHeaders(t, r, "grok-4.5")

@@ -791,6 +791,41 @@ func TestSummarizePool(t *testing.T) {
 	}
 }
 
+func TestDashboardIsBoundedAndDoesNotExposeSecrets(t *testing.T) {
+	store := newFakeStore()
+	store.creds["issue"] = storage.Credential{
+		ID: "issue", Name: "Needs attention", Enabled: false,
+		AccessToken: "secret-access-token", RefreshToken: "secret-refresh-token", LastError: "disabled by operator",
+	}
+	h := &Handlers{
+		Store: store, AdminKey: "dashboard-admin",
+		DashboardData: func() map[string]any { return map[string]any{"requests_total": uint64(12), "errors_total": uint64(1)} },
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/dashboard", nil)
+	req.Header.Set("Authorization", "Bearer dashboard-admin")
+	rr := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "secret-access-token") || strings.Contains(rr.Body.String(), "secret-refresh-token") {
+		t.Fatalf("dashboard leaked credentials: %s", rr.Body.String())
+	}
+	var response struct {
+		Pool struct {
+			Total int `json:"total"`
+		} `json:"pool"`
+		Metrics map[string]any   `json:"metrics"`
+		Issues  []map[string]any `json:"recent_issues"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Pool.Total != 1 || len(response.Issues) != 1 || response.Metrics["requests_total"] == nil {
+		t.Fatalf("response=%s", rr.Body.String())
+	}
+}
+
 func TestDeviceCredentialInputUsesAccountIdentity(t *testing.T) {
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{
 		"sub":"user-device-1",

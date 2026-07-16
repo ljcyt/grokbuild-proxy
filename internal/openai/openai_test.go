@@ -540,6 +540,55 @@ func TestHandleResponses_NonStream(t *testing.T) {
 	}
 }
 
+func TestHandleResponsesCompact_UsesCompactPostAndNormalizesModel(t *testing.T) {
+	called := false
+	h := &Handlers{
+		ResolveModel: func(model string) string {
+			if model == "alias" {
+				return "grok-4.5"
+			}
+			return model
+		},
+		PostCompact: func(_ context.Context, model, _ string, body []byte, stream bool) (*http.Response, error) {
+			called = true
+			if stream || model != "grok-4.5" {
+				t.Fatalf("stream=%v model=%q", stream, model)
+			}
+			var request map[string]any
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Fatal(err)
+			}
+			if got := asString(request["model"]); got != "grok-4.5" {
+				t.Fatalf("request model=%q", got)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"cmp","model":"grok-4.5-build-free","output":[]}`))}, nil
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"alias","input":"hello"}`))
+	rr := httptest.NewRecorder()
+	h.HandleResponsesCompact(rr, req)
+	if !called || rr.Code != http.StatusOK {
+		t.Fatalf("called=%v status=%d body=%s", called, rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"model":"alias"`)) {
+		t.Fatalf("response model not normalized: %s", rr.Body.String())
+	}
+}
+
+func TestHandleResponsesCompact_RejectsStream(t *testing.T) {
+	called := false
+	h := &Handlers{PostCompact: func(context.Context, string, string, []byte, bool) (*http.Response, error) {
+		called = true
+		return nil, nil
+	}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"grok-4.5","input":"hello","stream":true}`))
+	rr := httptest.NewRecorder()
+	h.HandleResponsesCompact(rr, req)
+	if rr.Code != http.StatusBadRequest || called || !strings.Contains(rr.Body.String(), "stream_not_supported") {
+		t.Fatalf("called=%v status=%d body=%s", called, rr.Code, rr.Body.String())
+	}
+}
+
 func TestHandleResponses_ResolvesConfiguredAlias(t *testing.T) {
 	var posted map[string]any
 	h := &Handlers{

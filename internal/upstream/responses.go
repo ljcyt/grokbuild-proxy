@@ -59,6 +59,34 @@ func (c *Client) PostResponses(ctx context.Context, body any, opts PostResponses
 	return c.Do(req)
 }
 
+// PostResponsesCompact calls POST /v1/responses/compact. The compact endpoint
+// only returns JSON, so streaming is deliberately not supported here.
+func (c *Client) PostResponsesCompact(ctx context.Context, body any, opts PostResponsesOptions) (*http.Response, error) {
+	if c == nil {
+		return nil, fmt.Errorf("upstream: nil client")
+	}
+	reader, modelFromBody, err := encodeBody(body)
+	if err != nil {
+		return nil, err
+	}
+	model := strings.TrimSpace(opts.Model)
+	if model == "" {
+		model = modelFromBody
+	}
+	req, err := c.NewRequest(ctx, http.MethodPost, "/responses/compact", reader, RequestOptions{
+		AccessToken:  opts.AccessToken,
+		Model:        model,
+		ConvID:       opts.ConvID,
+		Accept:       "application/json",
+		ContentType:  "application/json",
+		ExtraHeaders: opts.ExtraHeaders,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return c.Do(req)
+}
+
 // PostResponsesJSON is a non-stream helper that fully reads the body.
 func (c *Client) PostResponsesJSON(ctx context.Context, body any, opts PostResponsesOptions) (status int, header http.Header, raw []byte, err error) {
 	opts.Stream = false

@@ -771,6 +771,41 @@ func TestExecutorPostFailoverOn429(t *testing.T) {
 	}
 }
 
+func TestExecutorPostCompactFailsOverOn429(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses/compact" {
+			t.Errorf("path=%s", r.URL.Path)
+		}
+		if strings.Contains(r.Header.Get("Authorization"), "token-a") {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"compact-ok","model":"grok-4.5"}`))
+	}))
+	t.Cleanup(srv.Close)
+	ex := &Executor{
+		Store: newMemStore(
+			storage.Credential{ID: "cred_a", AccessToken: "token-a", Enabled: true, Priority: 200},
+			storage.Credential{ID: "cred_b", AccessToken: "token-b", Enabled: true, Priority: 100},
+		),
+		Selector:    lb.New(config.LBConfig{Strategy: "priority_rr"}),
+		Upstream:    upstream.NewClient(upstream.Config{BaseURL: srv.URL + "/v1", HTTPClient: srv.Client()}),
+		Refresher:   passthroughRefresher{},
+		MaxAttempts: 3,
+	}
+	resp, err := ex.PostCompact(context.Background(), "grok-4.5", "", []byte(`{"model":"grok-4.5","input":"x"}`), false)
+	if err != nil {
+		t.Fatalf("PostCompact: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "compact-ok") {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
+	}
+}
+
 func TestExecutorPostFailoverOnPaymentRequired(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.Header.Get("Authorization"), "token-a") {

@@ -32,6 +32,32 @@ type Metrics struct {
 	durationNanos atomic.Uint64
 }
 
+// Snapshot returns a stable, JSON-safe view for the local admin dashboard.
+func (m *Metrics) Snapshot() map[string]any {
+	if m == nil {
+		return map[string]any{}
+	}
+	requests := m.requests.Load()
+	errors := m.errors.Load()
+	avgLatencyMS := float64(0)
+	if requests > 0 {
+		avgLatencyMS = float64(m.durationNanos.Load()) / float64(requests) / float64(time.Millisecond)
+	}
+	errorRate := float64(0)
+	if requests > 0 {
+		errorRate = float64(errors) / float64(requests)
+	}
+	return map[string]any{
+		"requests_total":       requests,
+		"errors_total":         errors,
+		"success_total":        requests - errors,
+		"inflight":             m.inflight.Load(),
+		"response_bytes_total": m.responseBytes.Load(),
+		"avg_latency_ms":       avgLatencyMS,
+		"error_rate":           errorRate,
+	}
+}
+
 func (m *Metrics) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")

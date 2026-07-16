@@ -67,6 +67,10 @@ type Upstream interface {
 	GetBillingSnapshot(ctx context.Context, accessToken string) (*upstream.BillingSnapshot, error)
 }
 
+type compactUpstream interface {
+	PostResponsesCompact(ctx context.Context, body any, opts upstream.PostResponsesOptions) (*http.Response, error)
+}
+
 // TokenRefresher is the subset of auth.Refresher used by the executor.
 type TokenRefresher interface {
 	EnsureAccess(ctx context.Context, key string, current auth.TokenSet, load auth.TokenLoadFunc, persist auth.TokenPersistFunc) (auth.TokenSet, error)
@@ -110,6 +114,19 @@ type Executor struct {
 // to the caller (body not yet delivered). After a successful 2xx, MarkSuccess is
 // recorded. 426 is never failed-over; the original response is returned.
 func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, stream bool) (*http.Response, error) {
+	return e.post(ctx, model, convID, body, stream, false)
+}
+
+// PostCompact implements the OpenAI Responses compact endpoint using the same
+// credential selection, refresh, quota handling, and failover path as Post.
+func (e *Executor) PostCompact(ctx context.Context, model, convID string, body []byte, stream bool) (*http.Response, error) {
+	if stream {
+		return nil, fmt.Errorf("proxy: responses compact does not support streaming")
+	}
+	return e.post(ctx, model, convID, body, false, true)
+}
+
+func (e *Executor) post(ctx context.Context, model, convID string, body []byte, stream, compact bool) (*http.Response, error) {
 	if e == nil {
 		return nil, fmt.Errorf("proxy: nil executor")
 	}
@@ -265,7 +282,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 			continue
 		}
 		cred = verifiedCredential
-		resp, err := selectedUpstream.PostResponses(ctx, body, upstream.PostResponsesOptions{
+		resp, err := e.postUpstream(selectedUpstream, compact, ctx, body, upstream.PostResponsesOptions{
 			AccessToken:  verifiedCredential.AccessToken,
 			Model:        model,
 			ConvID:       convID,
@@ -384,7 +401,7 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				releaseSelection()
 				continue
 			}
-			retry, rerr := retryUpstream.PostResponses(ctx, body, upstream.PostResponsesOptions{
+			retry, rerr := e.postUpstream(retryUpstream, compact, ctx, body, upstream.PostResponsesOptions{
 				AccessToken:  verifiedCredential.AccessToken,
 				Model:        model,
 				ConvID:       convID,
@@ -461,6 +478,17 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 		return nil, lastErr
 	}
 	return nil, lb.ErrNoCredential
+}
+
+func (e *Executor) postUpstream(client Upstream, compact bool, ctx context.Context, body []byte, opts upstream.PostResponsesOptions) (*http.Response, error) {
+	if !compact {
+		return client.PostResponses(ctx, body, opts)
+	}
+	compactClient, ok := client.(compactUpstream)
+	if !ok {
+		return nil, fmt.Errorf("proxy: upstream compact endpoint is not configured")
+	}
+	return compactClient.PostResponsesCompact(ctx, body, opts)
 }
 
 // EnsureToken ensures a non-expired access token for the given credential,

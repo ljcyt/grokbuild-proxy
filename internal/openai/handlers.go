@@ -74,6 +74,65 @@ func (h *Handlers) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	proxyUpstreamJSON(w, resp, requestedModel)
 }
 
+// HandleResponsesCompact serves POST /v1/responses/compact. It shares request
+// sanitization and model alias handling with Responses, but rejects streaming
+// because the upstream compact endpoint only returns a JSON result.
+func (h *Handlers) HandleResponsesCompact(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.PostCompact == nil {
+		WriteError(w, http.StatusNotImplemented, "responses compact is not configured", "server_error", "not_configured")
+		return
+	}
+	if r.Method != http.MethodPost {
+		WriteError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
+		return
+	}
+	raw, err := h.readBody(r)
+	if err != nil {
+		if err == errBodyTooLarge {
+			WriteError(w, http.StatusRequestEntityTooLarge, "request body too large", "invalid_request_error", "body_too_large")
+			return
+		}
+		WriteError(w, http.StatusBadRequest, "failed to read body: "+err.Error(), "invalid_request_error", "invalid_body")
+		return
+	}
+	convHint := convIDFromRequest(r, extractBodyConvID(raw))
+	res, err := SanitizeResponses(raw, convHint)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_body")
+		return
+	}
+	if res.Stream {
+		WriteError(w, http.StatusBadRequest, "responses/compact does not support streaming", "invalid_request_error", "stream_not_supported")
+		return
+	}
+	requestedModel := res.Model
+	resolvedModel := h.resolve(requestedModel)
+	res.Body["model"] = resolvedModel
+	sanitized, err := marshalBody(res.Body)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "failed to encode request", "server_error", "encode_error")
+		return
+	}
+	sanitized, cacheKey, err := promptcache.Apply(sanitized, requestidentity.ClientID(r.Context()), resolvedModel, res.ConvID)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "failed to derive prompt cache key", "server_error", "prompt_cache_error")
+		return
+	}
+	if cacheKey != "" {
+		res.ConvID = cacheKey
+	}
+	resp, err := h.PostCompact(r.Context(), resolvedModel, res.ConvID, sanitized, false)
+	if err != nil {
+		writePostError(w, err)
+		return
+	}
+	if resp == nil {
+		WriteError(w, http.StatusBadGateway, "upstream returned nil response", "server_error", "upstream_error")
+		return
+	}
+	proxyUpstreamJSON(w, resp, requestedModel)
+}
+
 // HandleChatCompletions serves POST /v1/chat/completions.
 // Converts chat → Responses, posts upstream, converts non-stream Responses → chat.completion.
 // Stream chat is best-effort: converts output_text.delta events when possible.
