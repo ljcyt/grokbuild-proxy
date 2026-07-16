@@ -154,11 +154,12 @@ func main() {
 			credentialConfig.HTTPClient = httpClient
 			return upstream.NewClient(credentialConfig), nil
 		},
-		Refresher:     refresher,
-		Logger:        logger,
-		RequestID:     httpserver.RequestIDFromContext,
-		RouteRevision: settingsManager.Revision,
-		BodyPatch:     bodyPatch,
+		Refresher:         refresher,
+		Logger:            logger,
+		RequestID:         httpserver.RequestIDFromContext,
+		RouteRevision:     settingsManager.Revision,
+		BodyPatch:         bodyPatch,
+		CandidateCacheTTL: time.Duration(cfg.LB.CandidateCacheMS) * time.Millisecond,
 	}
 	ssoConverter := configuredSSOConverter(settingsManager, outboundFactory)
 	importManager, err := importer.NewManager(store, ssoConverter, importer.Limits{
@@ -194,6 +195,19 @@ func main() {
 	inspectionCtx, stopInspection := context.WithCancel(context.Background())
 	defer stopInspection()
 	go inspectionRunner.Run(inspectionCtx)
+	if cfg.LB.PreRefreshEnabled {
+		preRefreshCtx, stopPreRefresh := context.WithCancel(context.Background())
+		defer stopPreRefresh()
+		go (&proxy.PreRefresher{
+			Store:       store,
+			Executor:    exec,
+			Skew:        cfg.RefreshSkew(),
+			Interval:    time.Duration(cfg.LB.PreRefreshIntervalSec) * time.Second,
+			Concurrency: cfg.LB.PreRefreshConcurrency,
+			Timeout:     30 * time.Second,
+			Logger:      logger,
+		}).Run(preRefreshCtx)
+	}
 
 	oai := &openai.Handlers{
 		Post:         exec.Post,

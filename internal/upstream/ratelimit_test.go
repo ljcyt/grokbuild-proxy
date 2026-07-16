@@ -3,6 +3,7 @@ package upstream
 import (
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestParseRateLimitHeaders(t *testing.T) {
@@ -29,6 +30,31 @@ func TestParseRateLimitHeaders(t *testing.T) {
 	}
 	if got.Exhausted() {
 		t.Fatal("should not be exhausted")
+	}
+}
+
+func TestRateLimitResetAfterUsesExhaustedWindow(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	requests := int64(0)
+	tokens := int64(5)
+	reset := now.Add(90 * time.Second)
+	limit := RateLimit{RemainingRequests: &requests, RemainingTokens: &tokens, ResetRequestsAt: &reset}
+	if got := limit.ResetAfter(now); got != 90*time.Second {
+		t.Fatalf("reset=%v", got)
+	}
+}
+
+func TestParseRateLimitResetDuration(t *testing.T) {
+	h := make(http.Header)
+	h.Set("X-Ratelimit-Remaining-Requests", "0")
+	h.Set("X-Ratelimit-Reset-Requests", "90s")
+	limit, ok := ParseRateLimitHeaders(h)
+	if !ok || limit.ResetRequestsAt == nil {
+		t.Fatalf("limit=%+v ok=%v", limit, ok)
+	}
+	remaining := time.Until(*limit.ResetRequestsAt)
+	if remaining < 85*time.Second || remaining > 91*time.Second {
+		t.Fatalf("remaining=%v", remaining)
 	}
 }
 

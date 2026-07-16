@@ -771,6 +771,50 @@ func TestExecutorPostFailoverOn429(t *testing.T) {
 	}
 }
 
+func TestExecutorHoldsCredentialConcurrencyUntilResponseClose(t *testing.T) {
+	store := newMemStore(storage.Credential{ID: "only", AccessToken: "token", Enabled: true})
+	ex := &Executor{
+		Store:     store,
+		Selector:  lb.New(config.LBConfig{Strategy: "priority_rr", CredentialMaxConcurrent: 1}),
+		Refresher: passthroughRefresher{},
+		Upstream: postFuncUpstream{post: func(context.Context, upstream.PostResponsesOptions) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}},
+	}
+	first, err := ex.Post(context.Background(), "grok-4.5", "", []byte(`{"model":"grok-4.5"}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ex.Post(context.Background(), "grok-4.5", "", []byte(`{"model":"grok-4.5"}`), false); !errors.Is(err, lb.ErrNoCredential) {
+		t.Fatalf("second request err=%v want no credential while first body is open", err)
+	}
+	if err := first.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := ex.Post(context.Background(), "grok-4.5", "", []byte(`{"model":"grok-4.5"}`), false)
+	if err != nil {
+		t.Fatalf("request after close: %v", err)
+	}
+	second.Body.Close()
+}
+
+func TestExecutorCachesCredentialCandidatesBriefly(t *testing.T) {
+	store := newMemStore(storage.Credential{ID: "one", Enabled: true})
+	ex := &Executor{Store: store, CandidateCacheTTL: time.Minute}
+	if _, err := ex.listCredentialCandidates(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ex.listCredentialCandidates(); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	calls := store.candidates
+	store.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("candidate calls=%d want 1", calls)
+	}
+}
+
 func TestExecutorPostCompactFailsOverOn429(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses/compact" {

@@ -40,6 +40,7 @@ type Selector struct {
 	cooldownMax          time.Duration
 	quotaCooldown        time.Duration
 	quotaReserveRequests int
+	maxConcurrent        int
 
 	mu        sync.Mutex
 	persistMu sync.Mutex
@@ -95,11 +96,30 @@ func New(cfg config.LBConfig) *Selector {
 		cooldownMax:          max,
 		quotaCooldown:        quotaCooldown,
 		quotaReserveRequests: quotaReserveRequests,
+		maxConcurrent:        cfg.CredentialMaxConcurrent,
 		priorityRR:           make(map[int]int),
 		sticky:               make(map[string]stickyBinding),
 		states:               make(map[string]*runtimeState),
 		inFlight:             make(map[string]int),
 	}
+}
+
+// HoldSuccessfulResponse reports whether a selected credential must remain
+// reserved until its response body is closed. This is required for a real
+// per-credential concurrency limit, especially for long-lived SSE responses.
+func (s *Selector) HoldSuccessfulResponse() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxConcurrent > 0
+}
+
+// MarkSuccessHold records success without releasing the selected credential.
+// The executor releases it when the upstream response body is closed.
+func (s *Selector) MarkSuccessHold(credID, stickyKey string, now time.Time) {
+	s.markSuccess(credID, stickyKey, now, false)
 }
 
 // Available returns credentials that are enabled and not in cooldown (storage fields only).
@@ -153,11 +173,17 @@ func (s *Selector) Pick(creds []storage.Credential, stickyKey string, now time.T
 
 // MarkSuccess clears failure/cooldown for credID and refreshes sticky binding.
 func (s *Selector) MarkSuccess(credID, stickyKey string, now time.Time) {
+	s.markSuccess(credID, stickyKey, now, true)
+}
+
+func (s *Selector) markSuccess(credID, stickyKey string, now time.Time, release bool) {
 	if credID == "" {
 		return
 	}
 	s.mu.Lock()
-	s.releaseLocked(credID)
+	if release {
+		s.releaseLocked(credID)
+	}
 	st := s.ensureState(credID)
 	needsPersist := st.FailureCount != 0 ||
 		!st.CooldownUntil.IsZero() ||
@@ -232,6 +258,12 @@ func (s *Selector) MarkFailure(credID string, status int, retryAfter time.Durati
 // bindings. It is used for advertised zero remaining quota and the known chat
 // endpoint quota-denied response, not for unrelated 402/403 failures.
 func (s *Selector) MarkQuotaExhausted(credID string, now time.Time) {
+	s.MarkQuotaExhaustedUntil(credID, now, time.Time{})
+}
+
+// MarkQuotaExhaustedUntil applies a known upstream reset deadline when one is
+// available. A missing or invalid deadline retains the configured safe fallback.
+func (s *Selector) MarkQuotaExhaustedUntil(credID string, now time.Time, resetAt time.Time) {
 	if credID == "" {
 		return
 	}
@@ -239,7 +271,11 @@ func (s *Selector) MarkQuotaExhausted(credID string, now time.Time) {
 	s.releaseLocked(credID)
 	st := s.ensureState(credID)
 	st.FailureCount++
-	st.CooldownUntil = now.Add(s.quotaCooldown)
+	until := now.Add(s.quotaCooldown)
+	if resetAt.After(now) {
+		until = resetAt.UTC()
+	}
+	st.CooldownUntil = until
 	st.LastError = "quota_exhausted"
 	s.clearStickyForCred(credID)
 	failureCount := st.FailureCount
@@ -305,6 +341,9 @@ func (s *Selector) availableLocked(creds []storage.Credential, now time.Time) []
 		}
 		s.seedState(c)
 		if s.inCooldown(c, now) {
+			continue
+		}
+		if s.maxConcurrent > 0 && s.inFlight[c.ID] >= s.maxConcurrent {
 			continue
 		}
 		out = append(out, c)

@@ -340,6 +340,19 @@ func TestMarkQuotaExhaustedUsesDedicatedCooldown(t *testing.T) {
 	}
 }
 
+func TestMarkQuotaExhaustedUsesKnownResetDeadline(t *testing.T) {
+	s := New(testCfg("priority_rr"))
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	resetAt := now.Add(45 * time.Minute)
+	s.MarkQuotaExhaustedUntil("quota", now, resetAt)
+	s.mu.Lock()
+	until := s.states["quota"].CooldownUntil
+	s.mu.Unlock()
+	if !until.Equal(resetAt) {
+		t.Fatalf("cooldown=%v want %v", until, resetAt)
+	}
+}
+
 func TestPickPrefersQuotaHeadroomOverPriority(t *testing.T) {
 	cfg := testCfg("priority_rr")
 	cfg.QuotaReserveRequests = 1

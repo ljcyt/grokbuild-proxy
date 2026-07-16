@@ -58,6 +58,15 @@ type quotaExhaustionMarker interface {
 	MarkQuotaExhausted(credID string, now time.Time)
 }
 
+type quotaExhaustionUntilMarker interface {
+	MarkQuotaExhaustedUntil(credID string, now time.Time, resetAt time.Time)
+}
+
+type successHoldingSelector interface {
+	HoldSuccessfulResponse() bool
+	MarkSuccessHold(credID, stickyKey string, now time.Time)
+}
+
 // Upstream is the subset of upstream.Client used by the executor.
 type Upstream interface {
 	PostResponses(ctx context.Context, body any, opts upstream.PostResponsesOptions) (*http.Response, error)
@@ -102,10 +111,18 @@ type Executor struct {
 	// BodyPatch optionally rewrites the upstream Responses body after protocol
 	// translation (raw JSON path overrides such as tools.-1).
 	BodyPatch func(body []byte, model string) ([]byte, error)
+	// CandidateCacheTTL bounds how long the secret-free candidate view is reused.
+	// Zero uses a conservative 250ms default.
+	CandidateCacheTTL time.Duration
 
-	usageMu       sync.Mutex
-	lastUsed      map[string]time.Time
-	billingFlight singleflight.Group
+	usageMu         sync.Mutex
+	lastUsed        map[string]time.Time
+	billingFlight   singleflight.Group
+	candidateMu     sync.Mutex
+	candidates      []storage.Credential
+	candidatesTill  time.Time
+	candidateTTL    time.Duration
+	candidateFlight singleflight.Group
 }
 
 // Post implements openai.PostResponsesFunc / anthropic.PostResponsesFunc.
@@ -153,7 +170,7 @@ func (e *Executor) post(ctx context.Context, model, convID string, body []byte, 
 	var lastErr error
 	var lastResp *http.Response
 	idempotencyKey := newIdempotencyKey()
-	candidates, err := e.Store.ListCredentialCandidates()
+	candidates, err := e.listCredentialCandidates()
 	if err != nil {
 		return nil, fmt.Errorf("proxy: list credential candidates: %w", err)
 	}
@@ -194,8 +211,17 @@ func (e *Executor) post(ctx context.Context, model, convID string, body []byte, 
 			}
 			selectionCompleted = true
 		}
-		markSuccess := func() {
-			e.Selector.MarkSuccess(cred.ID, convID, e.now())
+		markSuccess := func(resp *http.Response) {
+			if holder, ok := e.Selector.(successHoldingSelector); ok && holder.HoldSuccessfulResponse() && resp != nil && resp.Body != nil {
+				holder.MarkSuccessHold(cred.ID, convID, e.now())
+				if releaser, ok := e.Selector.(selectorReleaser); ok {
+					resp.Body = &releaseOnClose{ReadCloser: resp.Body, release: func() { releaser.Release(cred.ID) }}
+				} else {
+					e.Selector.MarkSuccess(cred.ID, convID, e.now())
+				}
+			} else {
+				e.Selector.MarkSuccess(cred.ID, convID, e.now())
+			}
 			selectionCompleted = true
 		}
 		markFailure := func(status int, retryAfter time.Duration) {
@@ -317,15 +343,15 @@ func (e *Executor) post(ctx context.Context, model, convID string, body []byte, 
 			// Persist the snapshot always; if remaining hits 0 after this successful
 			// turn, cool the account down so the next turn switches credentials
 			// before the client sees chat-endpoint Forbidden.
-			if e.observeRateLimit(cred.ID, resp.Header) {
+			if exhausted, resetAfter := e.observeRateLimit(cred.ID, resp.Header); exhausted {
 				e.log(ctx, slog.LevelInfo, "credential_rate_limit_exhausted",
 					"credential_id", cred.ID,
 					"attempt", attempt+1,
 				)
 				// This successful response is still returned; the next turn switches.
-				e.markQuotaExhausted(cred.ID)
+				e.markQuotaExhausted(cred.ID, resetAfter)
 			} else {
-				markSuccess()
+				markSuccess(resp)
 			}
 			_ = e.touchLastUsed(cred)
 			return resp, nil
@@ -414,10 +440,10 @@ func (e *Executor) post(ctx context.Context, model, convID string, body []byte, 
 				continue
 			}
 			if retry.StatusCode >= 200 && retry.StatusCode < 300 {
-				if e.observeRateLimit(cred.ID, retry.Header) {
-					e.markQuotaExhausted(cred.ID)
+				if exhausted, resetAfter := e.observeRateLimit(cred.ID, retry.Header); exhausted {
+					e.markQuotaExhausted(cred.ID, resetAfter)
 				} else {
-					markSuccess()
+					markSuccess(retry)
 				}
 				_ = e.touchLastUsed(cred)
 				return retry, nil
@@ -430,8 +456,8 @@ func (e *Executor) post(ctx context.Context, model, convID string, body []byte, 
 			ra := parseRetryAfterAt(retry.Header.Get("Retry-After"), e.now())
 			status := retry.StatusCode
 			lastResp = bufferErrorResponse(retry)
-			if e.observeRateLimit(cred.ID, retry.Header) || isChatEndpointQuotaDenied(lastResp) {
-				e.markQuotaExhausted(cred.ID)
+			if exhausted, resetAfter := e.observeRateLimit(cred.ID, retry.Header); exhausted || isChatEndpointQuotaDenied(lastResp) {
+				e.markQuotaExhausted(cred.ID, resetAfter)
 			} else {
 				markFailure(status, ra)
 			}
@@ -451,8 +477,8 @@ func (e *Executor) post(ctx context.Context, model, convID string, body []byte, 
 			status := resp.StatusCode
 			lastResp = bufferErrorResponse(resp)
 			// Capture free-tier remaining counters when present (often missing on errors).
-			if e.observeRateLimit(cred.ID, resp.Header) || isChatEndpointQuotaDenied(lastResp) {
-				e.markQuotaExhausted(cred.ID)
+			if exhausted, resetAfter := e.observeRateLimit(cred.ID, resp.Header); exhausted || isChatEndpointQuotaDenied(lastResp) {
+				e.markQuotaExhausted(cred.ID, resetAfter)
 			} else {
 				markFailure(status, ra)
 			}
@@ -489,6 +515,64 @@ func (e *Executor) postUpstream(client Upstream, compact bool, ctx context.Conte
 		return nil, fmt.Errorf("proxy: upstream compact endpoint is not configured")
 	}
 	return compactClient.PostResponsesCompact(ctx, body, opts)
+}
+
+func (e *Executor) listCredentialCandidates() ([]storage.Credential, error) {
+	if e == nil || e.Store == nil {
+		return nil, fmt.Errorf("proxy: credential store is not configured")
+	}
+	ttl := e.CandidateCacheTTL
+	if ttl <= 0 {
+		ttl = 250 * time.Millisecond
+	}
+	now := e.now()
+	e.candidateMu.Lock()
+	if now.Before(e.candidatesTill) {
+		values := append([]storage.Credential(nil), e.candidates...)
+		e.candidateMu.Unlock()
+		return values, nil
+	}
+	e.candidateMu.Unlock()
+
+	loaded, err, _ := e.candidateFlight.Do("credential-candidates", func() (any, error) {
+		checkNow := e.now()
+		e.candidateMu.Lock()
+		if checkNow.Before(e.candidatesTill) {
+			values := append([]storage.Credential(nil), e.candidates...)
+			e.candidateMu.Unlock()
+			return values, nil
+		}
+		e.candidateMu.Unlock()
+		values, err := e.Store.ListCredentialCandidates()
+		if err != nil {
+			return nil, err
+		}
+		e.candidateMu.Lock()
+		e.candidates = append(e.candidates[:0], values...)
+		e.candidatesTill = checkNow.Add(ttl)
+		e.candidateMu.Unlock()
+		return values, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return append([]storage.Credential(nil), loaded.([]storage.Credential)...), nil
+}
+
+type releaseOnClose struct {
+	io.ReadCloser
+	once    sync.Once
+	release func()
+}
+
+func (r *releaseOnClose) Close() error {
+	err := r.ReadCloser.Close()
+	r.once.Do(func() {
+		if r.release != nil {
+			r.release()
+		}
+	})
+	return err
 }
 
 // EnsureToken ensures a non-expired access token for the given credential,
@@ -1027,13 +1111,13 @@ func shouldMarkDiscoveryFailure(status int) bool {
 // observeRateLimit persists free-tier X-Ratelimit-* counters for a credential.
 // It returns true when remaining requests or tokens have reached zero, so the
 // caller can apply a long cooldown and switch accounts on the next turn.
-func (e *Executor) observeRateLimit(credID string, header http.Header) bool {
+func (e *Executor) observeRateLimit(credID string, header http.Header) (bool, time.Duration) {
 	if e == nil || e.Store == nil || credID == "" || header == nil {
-		return false
+		return false, 0
 	}
 	limit, ok := upstream.ParseRateLimitHeaders(header)
 	if !ok {
-		return false
+		return false, 0
 	}
 	now := e.now().UTC().Truncate(time.Second)
 	_, err := e.Store.PatchCredential(credID, func(c *storage.Credential) error {
@@ -1051,11 +1135,15 @@ func (e *Executor) observeRateLimit(credID string, header http.Header) bool {
 			"error", err,
 		)
 	}
-	return limit.Exhausted()
+	return limit.Exhausted(), limit.ResetAfter(e.now())
 }
 
-func (e *Executor) markQuotaExhausted(credID string) {
+func (e *Executor) markQuotaExhausted(credID string, resetAfter time.Duration) {
 	if e == nil || e.Selector == nil || credID == "" {
+		return
+	}
+	if marker, ok := e.Selector.(quotaExhaustionUntilMarker); ok && resetAfter > 0 {
+		marker.MarkQuotaExhaustedUntil(credID, e.now(), e.now().Add(resetAfter))
 		return
 	}
 	if marker, ok := e.Selector.(quotaExhaustionMarker); ok {

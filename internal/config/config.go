@@ -96,10 +96,18 @@ type LBConfig struct {
 	QuotaCooldownSec int `yaml:"quota_cooldown_sec"`
 	// QuotaReserveRequests leaves this many advertised request slots unused
 	// while the selector has concurrent work in flight for a credential.
-	QuotaReserveRequests int            `yaml:"quota_reserve_requests"`
-	StickyTTLSec         int            `yaml:"sticky_ttl_sec"`
-	RefreshSkewSec       int            `yaml:"refresh_skew_sec"`
-	Cooldown             CooldownConfig `yaml:"cooldown"`
+	QuotaReserveRequests int `yaml:"quota_reserve_requests"`
+	StickyTTLSec         int `yaml:"sticky_ttl_sec"`
+	RefreshSkewSec       int `yaml:"refresh_skew_sec"`
+	// CandidateCacheMS caches the secret-free selection view briefly. Zero disables it.
+	CandidateCacheMS int `yaml:"candidate_cache_ms"`
+	// CredentialMaxConcurrent caps active upstream responses per credential. Zero disables it.
+	CredentialMaxConcurrent int `yaml:"credential_max_concurrent"`
+	// PreRefresh keeps OAuth tokens fresh before a client request needs them.
+	PreRefreshEnabled     bool           `yaml:"pre_refresh_enabled"`
+	PreRefreshConcurrency int            `yaml:"pre_refresh_concurrency"`
+	PreRefreshIntervalSec int            `yaml:"pre_refresh_interval_sec"`
+	Cooldown              CooldownConfig `yaml:"cooldown"`
 }
 
 // CooldownConfig is exponential backoff bounds for failed credentials.
@@ -230,12 +238,16 @@ func Default() Config {
 			CountTokens:         false,
 		},
 		LB: LBConfig{
-			Strategy:             "priority_rr",
-			MaxAttempts:          10,
-			QuotaCooldownSec:     7 * 24 * 60 * 60,
-			QuotaReserveRequests: 1,
-			StickyTTLSec:         3600,
-			RefreshSkewSec:       180,
+			Strategy:              "priority_rr",
+			MaxAttempts:           10,
+			QuotaCooldownSec:      7 * 24 * 60 * 60,
+			QuotaReserveRequests:  1,
+			StickyTTLSec:          3600,
+			RefreshSkewSec:        180,
+			CandidateCacheMS:      250,
+			PreRefreshEnabled:     true,
+			PreRefreshConcurrency: 2,
+			PreRefreshIntervalSec: 60,
 			Cooldown: CooldownConfig{
 				BaseSec: 300,
 				MaxSec:  3600,
@@ -372,6 +384,18 @@ func (c Config) Validate() error {
 	}
 	if c.LB.RefreshSkewSec < 0 {
 		return fmt.Errorf("lb.refresh_skew_sec must be >= 0")
+	}
+	if c.LB.CandidateCacheMS < 0 || c.LB.CandidateCacheMS > 5000 {
+		return fmt.Errorf("lb.candidate_cache_ms must be between 0 and 5000")
+	}
+	if c.LB.CredentialMaxConcurrent < 0 || c.LB.CredentialMaxConcurrent > 1000 {
+		return fmt.Errorf("lb.credential_max_concurrent must be between 0 and 1000")
+	}
+	if c.LB.PreRefreshConcurrency < 0 || c.LB.PreRefreshConcurrency > 32 || c.LB.PreRefreshIntervalSec < 0 || c.LB.PreRefreshIntervalSec > 3600 {
+		return fmt.Errorf("lb pre-refresh settings are invalid")
+	}
+	if c.LB.PreRefreshEnabled && (c.LB.PreRefreshConcurrency == 0 || c.LB.PreRefreshIntervalSec == 0) {
+		return fmt.Errorf("lb pre-refresh concurrency and interval must be > 0 when enabled")
 	}
 	if c.LB.Cooldown.BaseSec < 0 || c.LB.Cooldown.MaxSec < 0 {
 		return fmt.Errorf("lb.cooldown base_sec/max_sec must be >= 0")

@@ -115,6 +115,9 @@ func TestDefaultAlignedWithPlan(t *testing.T) {
 	if cfg.LB.StickyTTLSec != 3600 || cfg.LB.RefreshSkewSec != 180 {
 		t.Fatalf("lb sticky/refresh: %+v", cfg.LB)
 	}
+	if cfg.LB.CandidateCacheMS != 250 || !cfg.LB.PreRefreshEnabled || cfg.LB.PreRefreshConcurrency != 2 || cfg.LB.PreRefreshIntervalSec != 60 {
+		t.Fatalf("lb resource settings: %+v", cfg.LB)
+	}
 	if cfg.LB.Cooldown.BaseSec != 300 || cfg.LB.Cooldown.MaxSec != 3600 {
 		t.Fatalf("cooldown: %+v", cfg.LB.Cooldown)
 	}

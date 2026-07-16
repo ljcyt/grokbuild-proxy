@@ -54,6 +54,15 @@ lb:
   quota_reserve_requests: 1
   sticky_ttl_sec: 3600
   refresh_skew_sec: 180
+  # Cache only secret-free candidate metadata; 0 disables the cache.
+  candidate_cache_ms: 250
+  # Keep 0 for existing behavior. When set, a streaming response holds one
+  # credential slot until its upstream body is closed.
+  credential_max_concurrent: 0
+  # Refresh OAuth credentials before user traffic reaches the expiry window.
+  pre_refresh_enabled: true
+  pre_refresh_concurrency: 2
+  pre_refresh_interval_sec: 60
   cooldown:
     base_sec: 300
     max_sec: 3600
