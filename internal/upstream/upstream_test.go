@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestApplyHeaders(t *testing.T) {
@@ -308,6 +309,42 @@ func TestBillingSnapshotAllowsOneSideFailureAndNormalizesGrokBuild(t *testing.T)
 	}
 	if !snap.GrokBuild.Reported || snap.GrokBuild.SharedWeeklyUsagePercent == nil || *snap.GrokBuild.SharedWeeklyUsagePercent != 42 || snap.GrokBuild.GrokBuildContribution == nil || *snap.GrokBuild.GrokBuildContribution != 35 {
 		t.Fatalf("view=%+v", snap.GrokBuild)
+	}
+}
+
+func TestBillingSnapshotFetchesEndpointsConcurrently(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.RawQuery, "format=credits") {
+			_, _ = w.Write([]byte(`{"creditUsagePercent":12}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"monthlyLimit":100,"used":10}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewClient(Config{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.GetBillingSnapshot(context.Background(), "tok")
+		result <- err
+	}()
+
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("billing endpoints were not started concurrently")
+		}
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
 	}
 }
 

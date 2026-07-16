@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // MonthlyBilling is the default GET /v1/billing payload (subscription credits).
@@ -91,8 +92,23 @@ func (c *Client) GetBillingCredits(ctx context.Context, accessToken string) (*We
 
 // GetBillingSnapshot fetches monthly billing and best-effort weekly credits.
 func (c *Client) GetBillingSnapshot(ctx context.Context, accessToken string) (*BillingSnapshot, error) {
-	monthly, monthlyErr := c.GetBilling(ctx, accessToken)
-	weekly, weeklyErr := c.GetBillingCredits(ctx, accessToken)
+	// These endpoints are independent. Running them together makes the admin
+	// billing view bounded by the slower request instead of their sum.
+	var monthly *MonthlyBilling
+	var weekly *WeeklyCredits
+	var monthlyErr error
+	var weeklyErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		monthly, monthlyErr = c.GetBilling(ctx, accessToken)
+	}()
+	go func() {
+		defer wg.Done()
+		weekly, weeklyErr = c.GetBillingCredits(ctx, accessToken)
+	}()
+	wg.Wait()
 	snap := &BillingSnapshot{Monthly: monthly, Weekly: weekly}
 	if monthlyErr != nil {
 		snap.MonthlyError = safeBillingError(monthlyErr)

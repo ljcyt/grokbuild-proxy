@@ -19,10 +19,16 @@ import (
 	"github.com/GreyGunG/grokbuild-proxy/internal/lb"
 	"github.com/GreyGunG/grokbuild-proxy/internal/storage"
 	"github.com/GreyGunG/grokbuild-proxy/internal/upstream"
+	"golang.org/x/sync/singleflight"
 )
 
 // DefaultMaxAttempts is the max number of credential picks for a single Post.
 const DefaultMaxAttempts = 10
+
+// billingSnapshotTimeout bounds the shared admin billing lookup. It is kept
+// separate from request forwarding so a slow diagnostics endpoint cannot hold
+// credential refresh or proxy work indefinitely.
+const billingSnapshotTimeout = 30 * time.Second
 
 // ErrUpgradeRequired is returned when upstream responds 426 (protocol upgrade required).
 var ErrUpgradeRequired = errors.New("proxy: upstream requires protocol upgrade (426)")
@@ -93,8 +99,9 @@ type Executor struct {
 	// translation (raw JSON path overrides such as tools.-1).
 	BodyPatch func(body []byte, model string) ([]byte, error)
 
-	usageMu  sync.Mutex
-	lastUsed map[string]time.Time
+	usageMu       sync.Mutex
+	lastUsed      map[string]time.Time
+	billingFlight singleflight.Group
 }
 
 // Post implements openai.PostResponsesFunc / anthropic.PostResponsesFunc.
@@ -650,6 +657,35 @@ func (e *Executor) GetBillingSnapshot(ctx context.Context, credID string) (*upst
 	if e == nil || e.Store == nil {
 		return nil, fmt.Errorf("proxy: executor not configured")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	credID = strings.TrimSpace(credID)
+	if credID == "" {
+		return nil, fmt.Errorf("proxy: credential id is required")
+	}
+
+	resultCh := e.billingFlight.DoChan(credID, func() (any, error) {
+		sharedCtx, cancel := context.WithTimeout(context.Background(), billingSnapshotTimeout)
+		defer cancel()
+		return e.getBillingSnapshot(sharedCtx, credID)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		snapshot, ok := result.Val.(*upstream.BillingSnapshot)
+		if !ok || snapshot == nil {
+			return nil, fmt.Errorf("proxy: invalid billing snapshot result")
+		}
+		return snapshot, nil
+	}
+}
+
+func (e *Executor) getBillingSnapshot(ctx context.Context, credID string) (*upstream.BillingSnapshot, error) {
 	credential, err := e.Store.GetCredential(credID)
 	if err != nil {
 		return nil, err

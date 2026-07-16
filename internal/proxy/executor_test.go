@@ -252,6 +252,29 @@ func (u quotaProbeUpstream) GetBillingSnapshot(context.Context, string) (*upstre
 	return &upstream.BillingSnapshot{}, nil
 }
 
+type blockingBillingUpstream struct {
+	postFuncUpstream
+	started chan struct{}
+	release <-chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (u *blockingBillingUpstream) GetBillingSnapshot(context.Context, string) (*upstream.BillingSnapshot, error) {
+	u.mu.Lock()
+	u.calls++
+	u.mu.Unlock()
+	u.started <- struct{}{}
+	<-u.release
+	return &upstream.BillingSnapshot{}, nil
+}
+
+func (u *blockingBillingUpstream) callCount() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.calls
+}
+
 func (r *recordingRefresher) record(key string, current auth.TokenSet) (auth.TokenSet, error) {
 	r.mu.Lock()
 	r.keys = append(r.keys, key)
@@ -333,6 +356,53 @@ func TestProbeCredentialMapsInvalidTokenRefreshFailureToUnauthorized(t *testing.
 	status, err := executor.ProbeCredential(context.Background(), credential.ID)
 	if err == nil || status != http.StatusUnauthorized {
 		t.Fatalf("status=%d err=%v", status, err)
+	}
+}
+
+func TestGetBillingSnapshotCoalescesConcurrentCredentialLookups(t *testing.T) {
+	credential := storage.Credential{ID: "billing", Enabled: true, AccessToken: "access"}
+	release := make(chan struct{})
+	up := &blockingBillingUpstream{started: make(chan struct{}, 2), release: release}
+	executor := &Executor{Store: newMemStore(credential), Upstream: up}
+
+	errs := make(chan error, 2)
+	entered := make(chan struct{}, 2)
+	go func() {
+		entered <- struct{}{}
+		_, err := executor.GetBillingSnapshot(context.Background(), credential.ID)
+		errs <- err
+	}()
+	select {
+	case <-up.started:
+	case <-time.After(time.Second):
+		t.Fatal("first billing lookup did not start")
+	}
+	<-entered
+	go func() {
+		entered <- struct{}{}
+		_, err := executor.GetBillingSnapshot(context.Background(), credential.ID)
+		errs <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("second billing lookup did not enter")
+	}
+	// Keep the shared lookup blocked briefly so the second caller reaches the
+	// singleflight group before the leader is released.
+	time.Sleep(20 * time.Millisecond)
+	if got := up.callCount(); got != 1 {
+		close(release)
+		t.Fatalf("billing calls before release=%d want 1", got)
+	}
+	close(release)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := up.callCount(); got != 1 {
+		t.Fatalf("billing calls=%d want 1", got)
 	}
 }
 
