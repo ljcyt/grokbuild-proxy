@@ -108,6 +108,15 @@ list is server-paginated: `page`, `page_size` (1-100), `q`, and `status`
 or `disabled`) are accepted by
 `GET /admin/credentials`; the Admin UI requests 24 accounts per page.
 
+## Sub2API migration export
+
+`POST /admin/credentials/export-sub2api` returns a Sub2API Grok OAuth batch
+payload. It accepts only the existing Admin key (`Authorization: Bearer
+<admin_key>` or `X-Admin-Key`), never a client API key. The response includes
+OAuth secrets, has `Cache-Control: no-store`, and only contains enabled,
+non-quarantined, non-cooling accounts with recorded positive remaining quota.
+Accounts with unknown quota are intentionally excluded.
+
 ## Request raw path overrides
 
 `request_patch` rewrites the upstream Responses JSON body after Anthropic/OpenAI

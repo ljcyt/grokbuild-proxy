@@ -24,6 +24,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/credentials", h.ListCredentials)
 	mux.HandleFunc("POST /admin/credentials", h.CreateCredential)
 	mux.HandleFunc("POST /admin/credentials/import-grok", h.ImportGrok)
+	mux.HandleFunc("POST /admin/credentials/export-sub2api", h.ExportSub2APIGrok)
 	mux.HandleFunc("POST /admin/oauth/device/start", h.StartDeviceLogin)
 	mux.HandleFunc("POST /admin/oauth/device/poll", h.PollDeviceLogin)
 	mux.HandleFunc("GET /admin/settings", h.RuntimeSettings)
@@ -89,6 +90,8 @@ func (h *Handlers) dispatchFallback(w http.ResponseWriter, r *http.Request) {
 		h.CreateCredential(w, r)
 	case path == "/admin/credentials/import-grok" && r.Method == http.MethodPost:
 		h.ImportGrok(w, r)
+	case path == "/admin/credentials/export-sub2api" && r.Method == http.MethodPost:
+		h.ExportSub2APIGrok(w, r)
 	case path == "/admin/oauth/device/start" && r.Method == http.MethodPost:
 		h.StartDeviceLogin(w, r)
 	case path == "/admin/oauth/device/poll" && r.Method == http.MethodPost:
