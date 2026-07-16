@@ -68,7 +68,7 @@ func (h *Handlers) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if res.Stream || isSSEContentType(resp.Header.Get("Content-Type")) {
-		streamUpstreamSSE(w, resp, requestedModel)
+		streamUpstreamSSE(w, resp, requestedModel, h.ObserveUsage)
 		return
 	}
 	proxyUpstreamJSON(w, resp, requestedModel, h.ObserveUsage)

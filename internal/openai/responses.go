@@ -176,7 +176,7 @@ func responseUsage(raw []byte) (input, cached, output, reasoning int64) {
 }
 
 // streamUpstreamSSE copies upstream SSE to the client with Flush.
-func streamUpstreamSSE(w http.ResponseWriter, resp *http.Response, requestedModel string) {
+func streamUpstreamSSE(w http.ResponseWriter, resp *http.Response, requestedModel string, observe func(int64, int64, int64, int64)) {
 	defer resp.Body.Close()
 	copyUpstreamResponseHeaders(w.Header(), resp.Header)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -198,7 +198,14 @@ func streamUpstreamSSE(w http.ResponseWriter, resp *http.Response, requestedMode
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 32<<20)
 	for scanner.Scan() {
-		line := rewriteSSEModelLine(scanner.Bytes(), requestedModel)
+		original := scanner.Bytes()
+		if observe != nil {
+			input, cached, output, reasoning := sseUsage(original)
+			if input > 0 || cached > 0 || output > 0 || reasoning > 0 {
+				observe(input, cached, output, reasoning)
+			}
+		}
+		line := rewriteSSEModelLine(original, requestedModel)
 		if _, err := w.Write(append(line, '\n')); err != nil {
 			return
 		}
@@ -206,6 +213,27 @@ func streamUpstreamSSE(w http.ResponseWriter, resp *http.Response, requestedMode
 			flusher.Flush()
 		}
 	}
+}
+
+func sseUsage(line []byte) (input, cached, output, reasoning int64) {
+	payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+	var event struct {
+		Usage    json.RawMessage `json:"usage"`
+		Response struct {
+			Usage json.RawMessage `json:"usage"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(payload, &event) != nil {
+		return
+	}
+	usage := event.Usage
+	if len(usage) == 0 {
+		usage = event.Response.Usage
+	}
+	if len(usage) == 0 {
+		return
+	}
+	return responseUsage([]byte(`{"usage":` + string(usage) + `}`))
 }
 
 // rewriteResponseModel returns the original payload if it is not a JSON object.

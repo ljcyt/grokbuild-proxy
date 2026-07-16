@@ -926,3 +926,15 @@ td code {
 .dashboard-metric-value { font-size: 26px; }
 .dashboard-panel { padding: 18px; }
 @media (max-width: 900px) { .dashboard-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+@media (min-width: 901px) {
+  #view-shell { display: grid; grid-template-columns: 224px minmax(0, 1fr); min-height: 100vh; }
+  .topbar { position: sticky; top: 0; height: 100vh; z-index: 20; flex-direction: column; align-items: stretch; gap: 20px; padding: 22px 14px; border-bottom: 0; border-right: 1px solid var(--border); }
+  .brand { padding: 0 8px; }
+  .nav { flex: 0; display: grid; gap: 5px; }
+  .nav a { padding: 10px 12px; border-radius: 6px; }
+  #btn-logout { margin-top: auto; text-align: left; }
+  .main { width: 100%; max-width: none; margin: 0; padding: 30px 34px 48px; }
+  .page-head { margin-bottom: 22px; }
+  .page-head h2 { font-size: 24px; }
+}

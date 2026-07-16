@@ -157,7 +157,8 @@ func (m *Middleware) Observe(next http.Handler) http.Handler {
 		r = r.WithContext(ctx)
 
 		metrics := m.Metrics
-		if metrics != nil {
+		isAPI := strings.HasPrefix(r.URL.Path, "/v1/")
+		if metrics != nil && isAPI {
 			metrics.requests.Add(1)
 			metrics.inflight.Add(1)
 			defer metrics.inflight.Add(-1)
@@ -169,7 +170,7 @@ func (m *Middleware) Observe(next http.Handler) http.Handler {
 			recorder.status = http.StatusOK
 		}
 		elapsed := time.Since(start)
-		if metrics != nil {
+		if metrics != nil && isAPI {
 			if recorder.status >= 400 {
 				metrics.errors.Add(1)
 			}
